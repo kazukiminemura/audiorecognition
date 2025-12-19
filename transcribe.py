@@ -9,7 +9,7 @@ from optimum.intel.openvino import OVModelForSpeechSeq2Seq
 from transformers import AutoProcessor
 
 
-DEFAULT_MODEL_ID = "OpenVINO/whisper-large-v3-fp16-ov"
+DEFAULT_MODEL_ID = "OpenVINO/whisper-tiny-int8-ov"
 _WARNED_SAMPLERATES = set()
 _WARNED_DENOISE = set()
 # Use None so sounddevice picks the OS default input device.
@@ -226,6 +226,7 @@ class WhisperOVTranscriber:
         stride_length_s=5.0,
         max_new_tokens=128,
         denoise=True,
+        num_beams=1,
     ):
         self.language = language
         self.task = task
@@ -233,6 +234,7 @@ class WhisperOVTranscriber:
         self.stride_length_s = stride_length_s
         self.max_new_tokens = max_new_tokens
         self.denoise = denoise
+        self.num_beams = num_beams
         self.processor, self.model, self.target_sr = prepare_model(model_id, device)
 
     def transcribe_array(self, audio, sr):
@@ -247,6 +249,7 @@ class WhisperOVTranscriber:
             self.stride_length_s,
             self.max_new_tokens,
             self.denoise,
+            self.num_beams,
         )
 
     def transcribe_file(self, audio_path):
@@ -277,6 +280,7 @@ def transcribe_array(
     stride_length_s,
     max_new_tokens,
     denoise,
+    num_beams,
 ):
     forced_decoder_ids = build_forced_decoder_ids(processor, language, task)
 
@@ -290,6 +294,7 @@ def transcribe_array(
             forced_decoder_ids=forced_decoder_ids,
             language=language if language else None,
             max_new_tokens=max_new_tokens,
+            num_beams=num_beams,
         )
         text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
         segments.append(text.strip())
@@ -307,6 +312,7 @@ def transcribe_audio(
     stride_length_s,
     max_new_tokens,
     denoise,
+    num_beams,
 ):
     transcriber = WhisperOVTranscriber(
         model_id=model_id,
@@ -317,13 +323,14 @@ def transcribe_audio(
         stride_length_s=stride_length_s,
         max_new_tokens=max_new_tokens,
         denoise=denoise,
+        num_beams=num_beams,
     )
     return transcriber.transcribe_file(audio_path)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="CLI for speech recognition with OpenVINO distil-whisper-large-v3-int4-ov."
+        description="CLI for speech recognition with OpenVINO Whisper models.",
     )
     parser.add_argument(
         "audio",
@@ -393,10 +400,22 @@ def parse_args():
         help="Generation length cap.",
     )
     parser.add_argument(
+        "--num-beams",
+        type=int,
+        default=1,
+        help="Beam search width (1 = greedy, faster).",
+    )
+    parser.add_argument(
         "--no-denoise",
         dest="denoise",
         action="store_false",
         help="Disable pre-processing noise reduction.",
+    )
+    parser.add_argument(
+        "--preset",
+        choices=["balanced", "fast", "quality"],
+        default="fast",
+        help="Tuning shortcuts: fast (tiny int8, shorter chunks), balanced (small fp16), quality (large fp16).",
     )
     parser.set_defaults(denoise=True)
     return parser.parse_args()
@@ -416,6 +435,26 @@ def main():
     if args.loopback and not args.mic:
         raise ValueError("--loopback requires --mic.")
 
+    # Apply speed/quality presets (override conflicting params).
+    if args.preset == "fast":
+        args.model_id = "OpenVINO/whisper-tiny-int8-ov"
+        args.chunk_length = 10.0
+        args.stride = 2.0
+        args.max_new_tokens = 64
+        args.num_beams = 1
+    elif args.preset == "balanced":
+        args.model_id = "OpenVINO/whisper-small-fp16-ov"
+        args.chunk_length = 15.0
+        args.stride = 3.0
+        args.max_new_tokens = 96
+        args.num_beams = 1
+    elif args.preset == "quality":
+        args.model_id = "OpenVINO/whisper-large-v3-fp16-ov"
+        args.chunk_length = 30.0
+        args.stride = 5.0
+        args.max_new_tokens = 128
+        args.num_beams = 4
+
     # Normalize mic device: None / "" / "default" -> OS default input.
     mic_device = (
         None
@@ -434,6 +473,7 @@ def main():
             stride_length_s=args.stride,
             max_new_tokens=args.max_new_tokens,
             denoise=args.denoise,
+            num_beams=args.num_beams,
         )
         print("Ready")
         try:
@@ -460,6 +500,7 @@ def main():
             stride_length_s=args.stride,
             max_new_tokens=args.max_new_tokens,
             denoise=args.denoise,
+            num_beams=args.num_beams,
         )
     print(text)
 
