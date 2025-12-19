@@ -11,7 +11,7 @@ from transformers import AutoProcessor
 
 DEFAULT_MODEL_ID = "OpenVINO/whisper-large-v3-fp16-ov"
 _WARNED_SAMPLERATES = set()
-DEFAULT_MIC_DEVICE = "マイク配列 (デジタルマイク向けインテル® スマート・サウンド・テクノロジー), Windows WASAPI"
+DEFAULT_MIC_DEVICE = None
 
 
 def load_audio(path, target_sr):
@@ -281,7 +281,7 @@ def parse_args():
     parser.add_argument("--language", default="ja", help="Language code, e.g. ja, en.")
     parser.add_argument(
         "--task",
-        default=None,
+        default="transcribe",
         choices=["transcribe", "translate"],
         help="Whisper task hint.",
     )
@@ -320,6 +320,14 @@ def main():
     if args.loopback and not args.mic:
         raise ValueError("--loopback requires --mic.")
 
+    # Normalize mic device: None / "" / "default" -> OS default input.
+    mic_device = (
+        None
+        if args.mic_device is None
+        or str(args.mic_device).strip().lower() in ("", "default", "system")
+        else args.mic_device
+    )
+
     if args.mic:
         processor, model, target_sr = prepare_model(args.model_id, args.device)
         print("Ready")
@@ -328,7 +336,7 @@ def main():
                 audio, sr = record_audio(
                     duration_s=3.0,
                     target_sr=target_sr,
-                    device=args.mic_device,
+                    device=mic_device,
                     loopback=args.loopback,
                 )
                 text = transcribe_array(
