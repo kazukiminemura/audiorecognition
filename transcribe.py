@@ -11,6 +11,8 @@ from transformers import AutoProcessor
 
 DEFAULT_MODEL_ID = "OpenVINO/whisper-large-v3-fp16-ov"
 _WARNED_SAMPLERATES = set()
+_WARNED_DENOISE = set()
+# Use None so sounddevice picks the OS default input device.
 DEFAULT_MIC_DEVICE = None
 
 
@@ -158,6 +160,39 @@ def chunk_audio(audio, sr, chunk_length_s, stride_length_s):
         start += step
 
 
+def denoise_audio(audio, sr, noise_seconds=0.5):
+    """Lightweight spectral subtraction using the first part of the clip as noise profile."""
+    if sr <= 0 or audio.size == 0:
+        return audio
+
+    noise_len = min(len(audio), int(noise_seconds * sr))
+    # Skip if clip is too short to build a profile.
+    if noise_len < max(int(0.05 * sr), 32):
+        return audio
+
+    try:
+        n_fft = 2048
+        hop = 512
+        noise_clip = audio[:noise_len]
+        noise_stft = librosa.stft(noise_clip, n_fft=n_fft, hop_length=hop)
+        noise_mag = np.abs(noise_stft).mean(axis=1, keepdims=True)
+
+        stft = librosa.stft(audio, n_fft=n_fft, hop_length=hop)
+        mag, phase = np.abs(stft), np.angle(stft)
+        mag_denoised = np.maximum(mag - noise_mag, 0)
+
+        cleaned = librosa.istft(
+            mag_denoised * np.exp(1j * phase), hop_length=hop, length=len(audio)
+        )
+        return cleaned.astype(np.float32)
+    except Exception as exc:
+        key = type(exc).__name__
+        if key not in _WARNED_DENOISE:
+            print(f"Noise reduction failed; using raw audio. ({exc})")
+            _WARNED_DENOISE.add(key)
+        return audio
+
+
 def build_forced_decoder_ids(processor, language, task):
     if language or task:
         return processor.get_decoder_prompt_ids(
@@ -188,11 +223,14 @@ def transcribe_array(
     chunk_length_s,
     stride_length_s,
     max_new_tokens,
+    denoise,
 ):
     forced_decoder_ids = build_forced_decoder_ids(processor, language, task)
 
     segments = []
     for chunk in chunk_audio(audio, sr, chunk_length_s, stride_length_s):
+        if denoise:
+            chunk = denoise_audio(chunk, sr)
         inputs = processor(chunk, sampling_rate=sr, return_tensors="pt")
         generated_ids = model.generate(
             inputs.input_features,
@@ -215,6 +253,7 @@ def transcribe_audio(
     chunk_length_s,
     stride_length_s,
     max_new_tokens,
+    denoise,
 ):
     processor, model, target_sr = prepare_model(model_id, device)
 
@@ -229,6 +268,7 @@ def transcribe_audio(
         chunk_length_s,
         stride_length_s,
         max_new_tokens,
+        denoise,
     )
 
 
@@ -303,6 +343,13 @@ def parse_args():
         default=128,
         help="Generation length cap.",
     )
+    parser.add_argument(
+        "--no-denoise",
+        dest="denoise",
+        action="store_false",
+        help="Disable pre-processing noise reduction.",
+    )
+    parser.set_defaults(denoise=True)
     return parser.parse_args()
 
 
@@ -349,6 +396,7 @@ def main():
                     args.chunk_length,
                     args.stride,
                     args.max_new_tokens,
+                    args.denoise,
                 )
                 if text:
                     print(text)
@@ -366,9 +414,11 @@ def main():
             chunk_length_s=args.chunk_length,
             stride_length_s=args.stride,
             max_new_tokens=args.max_new_tokens,
+            denoise=args.denoise,
         )
     print(text)
 
 
 if __name__ == "__main__":
     main()
+
