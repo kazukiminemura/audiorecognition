@@ -1,5 +1,7 @@
 import argparse
 import os
+import threading
+from queue import Queue, Empty
 
 import librosa
 import numpy as np
@@ -9,7 +11,7 @@ from optimum.intel.openvino import OVModelForSpeechSeq2Seq
 from transformers import AutoProcessor
 
 
-DEFAULT_MODEL_ID = "OpenVINO/whisper-tiny-int8-ov"
+DEFAULT_MODEL_ID = "OpenVINO/whisper-large-v3-fp16-ov"
 _WARNED_SAMPLERATES = set()
 _WARNED_DENOISE = set()
 # Use None so sounddevice picks the OS default input device.
@@ -414,8 +416,14 @@ def parse_args():
     parser.add_argument(
         "--preset",
         choices=["balanced", "fast", "quality"],
-        default="fast",
-        help="Tuning shortcuts: fast (tiny int8, shorter chunks), balanced (small fp16), quality (large fp16).",
+        default="quality",
+        help="Tuning shortcuts: fast (tiny int8, shorter chunks), balanced (small fp16), quality (large fp16, higher beams).",
+    )
+    parser.add_argument(
+        "--record-chunk",
+        type=float,
+        default=4.0,
+        help="Per-chunk recording duration in seconds when using --mic.",
     )
     parser.set_defaults(denoise=True)
     return parser.parse_args()
@@ -450,9 +458,9 @@ def main():
         args.num_beams = 1
     elif args.preset == "quality":
         args.model_id = "OpenVINO/whisper-large-v3-fp16-ov"
-        args.chunk_length = 30.0
-        args.stride = 5.0
-        args.max_new_tokens = 128
+        args.chunk_length = 35.0
+        args.stride = 7.0
+        args.max_new_tokens = 160
         args.num_beams = 4
 
     # Normalize mic device: None / "" / "default" -> OS default input.
@@ -476,16 +484,43 @@ def main():
             num_beams=args.num_beams,
         )
         print("Ready")
-        try:
-            while True:
-                text = transcriber.transcribe_mic_chunk(
-                    duration_s=3.0,
-                    mic_device=mic_device,
+        stop_event = threading.Event()
+        work_q: Queue[tuple[np.ndarray, int]] = Queue()
+
+        def producer():
+            while not stop_event.is_set():
+                audio, sr = record_audio(
+                    duration_s=args.record_chunk,
+                    target_sr=transcriber.target_sr,
+                    device=mic_device,
                     loopback=args.loopback,
                 )
+                # Block instead of dropping to guarantee no chunks are skipped.
+                work_q.put((audio, sr))
+
+        def consumer():
+            while not stop_event.is_set() or not work_q.empty():
+                try:
+                    audio, sr = work_q.get(timeout=0.5)
+                except Empty:
+                    continue
+                text = transcriber.transcribe_array(audio, sr)
                 if text:
                     print(text)
+                work_q.task_done()
+
+        prod_t = threading.Thread(target=producer, daemon=True)
+        cons_t = threading.Thread(target=consumer, daemon=True)
+        prod_t.start()
+        cons_t.start()
+        try:
+            while prod_t.is_alive() and cons_t.is_alive():
+                prod_t.join(timeout=0.5)
+                cons_t.join(timeout=0.5)
         except KeyboardInterrupt:
+            stop_event.set()
+            prod_t.join()
+            cons_t.join()
             return
     else:
         if not os.path.exists(args.audio):
