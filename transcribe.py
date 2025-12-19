@@ -213,6 +213,59 @@ def prepare_model(model_id, device):
     return processor, model, target_sr
 
 
+class WhisperOVTranscriber:
+    """Reusable transcriber that can be imported by other apps."""
+
+    def __init__(
+        self,
+        model_id=DEFAULT_MODEL_ID,
+        device="AUTO",
+        language="ja",
+        task="transcribe",
+        chunk_length_s=30.0,
+        stride_length_s=5.0,
+        max_new_tokens=128,
+        denoise=True,
+    ):
+        self.language = language
+        self.task = task
+        self.chunk_length_s = chunk_length_s
+        self.stride_length_s = stride_length_s
+        self.max_new_tokens = max_new_tokens
+        self.denoise = denoise
+        self.processor, self.model, self.target_sr = prepare_model(model_id, device)
+
+    def transcribe_array(self, audio, sr):
+        return transcribe_array(
+            self.processor,
+            self.model,
+            audio,
+            sr,
+            self.language,
+            self.task,
+            self.chunk_length_s,
+            self.stride_length_s,
+            self.max_new_tokens,
+            self.denoise,
+        )
+
+    def transcribe_file(self, audio_path):
+        if not os.path.exists(audio_path):
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+        audio, sr = load_audio(audio_path, target_sr=self.target_sr)
+        return self.transcribe_array(audio, sr)
+
+    def transcribe_mic_chunk(self, duration_s=3.0, mic_device=None, loopback=False):
+        """Record once from mic and return text; good for GUI button-style usage."""
+        audio, sr = record_audio(
+            duration_s=duration_s,
+            target_sr=self.target_sr,
+            device=mic_device,
+            loopback=loopback,
+        )
+        return self.transcribe_array(audio, sr)
+
+
 def transcribe_array(
     processor,
     model,
@@ -255,21 +308,17 @@ def transcribe_audio(
     max_new_tokens,
     denoise,
 ):
-    processor, model, target_sr = prepare_model(model_id, device)
-
-    audio, sr = load_audio(audio_path, target_sr=target_sr)
-    return transcribe_array(
-        processor,
-        model,
-        audio,
-        sr,
-        language,
-        task,
-        chunk_length_s,
-        stride_length_s,
-        max_new_tokens,
-        denoise,
+    transcriber = WhisperOVTranscriber(
+        model_id=model_id,
+        device=device,
+        language=language,
+        task=task,
+        chunk_length_s=chunk_length_s,
+        stride_length_s=stride_length_s,
+        max_new_tokens=max_new_tokens,
+        denoise=denoise,
     )
+    return transcriber.transcribe_file(audio_path)
 
 
 def parse_args():
@@ -376,27 +425,23 @@ def main():
     )
 
     if args.mic:
-        processor, model, target_sr = prepare_model(args.model_id, args.device)
+        transcriber = WhisperOVTranscriber(
+            model_id=args.model_id,
+            device=args.device,
+            language=args.language,
+            task=args.task,
+            chunk_length_s=args.chunk_length,
+            stride_length_s=args.stride,
+            max_new_tokens=args.max_new_tokens,
+            denoise=args.denoise,
+        )
         print("Ready")
         try:
             while True:
-                audio, sr = record_audio(
+                text = transcriber.transcribe_mic_chunk(
                     duration_s=3.0,
-                    target_sr=target_sr,
-                    device=mic_device,
+                    mic_device=mic_device,
                     loopback=args.loopback,
-                )
-                text = transcribe_array(
-                    processor,
-                    model,
-                    audio,
-                    sr,
-                    args.language,
-                    args.task,
-                    args.chunk_length,
-                    args.stride,
-                    args.max_new_tokens,
-                    args.denoise,
                 )
                 if text:
                     print(text)
