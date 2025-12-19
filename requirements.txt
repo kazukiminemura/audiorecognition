@@ -1,0 +1,8 @@
+numpy
+soundfile
+librosa
+sounddevice
+transformers
+optimum-intel
+openvino
+torch
