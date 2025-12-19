@@ -346,12 +346,6 @@ def parse_args():
         help="Record from microphone instead of loading a file.",
     )
     parser.add_argument(
-        "--duration",
-        type=float,
-        default=5.0,
-        help="Recording duration in seconds for --mic.",
-    )
-    parser.add_argument(
         "--mic-device",
         default=DEFAULT_MIC_DEVICE,
         help="Input device name or index for --mic. For --loopback, use an output device.",
@@ -438,8 +432,6 @@ def main():
         raise ValueError("Use either an audio file or --mic, not both.")
     if not args.mic and not args.audio:
         raise ValueError("Provide an audio file or use --mic.")
-    if args.mic and args.duration <= 0:
-        raise ValueError("--duration must be > 0.")
     if args.loopback and not args.mic:
         raise ValueError("--loopback requires --mic.")
 
