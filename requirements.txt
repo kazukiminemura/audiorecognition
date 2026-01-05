@@ -1,7 +1,7 @@
 numpy
 soundfile
 librosa
-sounddevice
+pyaudiowpatch
 transformers
 optimum-intel
 openvino

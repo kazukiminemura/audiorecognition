@@ -5,8 +5,8 @@ from queue import Queue, Empty
 
 import librosa
 import numpy as np
-import sounddevice as sd
 import soundfile as sf
+import pyaudiowpatch as pyaudio
 from optimum.intel.openvino import OVModelForSpeechSeq2Seq
 from transformers import AutoProcessor
 
@@ -14,8 +14,11 @@ from transformers import AutoProcessor
 DEFAULT_MODEL_ID = "OpenVINO/whisper-large-v3-fp16-ov"
 _WARNED_SAMPLERATES = set()
 _WARNED_DENOISE = set()
-# Use None so sounddevice picks the OS default input device.
+# Use None so PyAudio picks the OS default input device.
 DEFAULT_MIC_DEVICE = None
+
+SAMPLE_FORMAT = pyaudio.paInt16
+FRAMES_PER_BUFFER = 1024
 
 
 def load_audio(path, target_sr):
@@ -28,112 +31,196 @@ def load_audio(path, target_sr):
     return audio, sr
 
 
+def _list_devices(pa):
+    print("Available devices:")
+    for idx in range(pa.get_device_count()):
+        info = pa.get_device_info_by_index(idx)
+        flags = []
+        if info.get("maxInputChannels", 0) > 0:
+            flags.append("IN")
+        if info.get("maxOutputChannels", 0) > 0:
+            flags.append("OUT")
+        if info.get("isLoopbackDevice"):
+            flags.append("LOOP")
+        flags_text = ",".join(flags) if flags else "N/A"
+        print(f"[{idx}] {info['name']} ({flags_text})")
+
+
 def list_devices():
-    devices = sd.query_devices()
-    hostapis = sd.query_hostapis()
-    for idx, dev in enumerate(devices):
-        hostapi_name = hostapis[dev["hostapi"]]["name"]
-        direction = []
-        if dev["max_input_channels"] > 0:
-            direction.append("in")
-        if dev["max_output_channels"] > 0:
-            direction.append("out")
-        direction_str = "/".join(direction) if direction else "none"
-        print(f"[{idx}] {dev['name']} ({hostapi_name}, {direction_str})")
+    pa = pyaudio.PyAudio()
+    try:
+        _list_devices(pa)
+    finally:
+        pa.terminate()
 
 
-def resolve_loopback_device(device):
-    devices = sd.query_devices()
-    hostapis = sd.query_hostapis()
+def _get_default_output(pa):
+    api = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+    return pa.get_device_info_by_index(api["defaultOutputDevice"])
 
-    def is_wasapi(dev):
-        hostapi_name = hostapis[dev["hostapi"]]["name"]
-        return "WASAPI" in hostapi_name.upper()
 
-    def is_output(dev):
-        return dev["max_output_channels"] > 0
+def _get_default_input(pa):
+    api = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+    return pa.get_device_info_by_index(api["defaultInputDevice"])
 
+
+def _is_loopback_device(info):
+    return bool(info.get("isLoopbackDevice"))
+
+
+def _find_device_by_name(
+    pa,
+    name_substring,
+    require_input=False,
+    require_output=False,
+    require_loopback=False,
+):
+    needle = name_substring.lower()
+    for idx in range(pa.get_device_count()):
+        info = pa.get_device_info_by_index(idx)
+        if needle not in info["name"].lower():
+            continue
+        if require_input and info.get("maxInputChannels", 0) <= 0:
+            continue
+        if require_output and info.get("maxOutputChannels", 0) <= 0:
+            continue
+        if require_loopback and not _is_loopback_device(info):
+            continue
+        return info
+    return None
+
+
+def _find_input_device(pa, device):
     if device is None:
-        default_out = sd.default.device[1]
-        if default_out is not None:
-            dev = devices[default_out]
-            if is_wasapi(dev) and is_output(dev):
-                return default_out
-        for idx, dev in enumerate(devices):
-            if is_wasapi(dev) and is_output(dev):
-                return idx
-        raise RuntimeError("No WASAPI output device found for loopback.")
+        return _get_default_input(pa)
+    if isinstance(device, int) or (isinstance(device, str) and device.isdigit()):
+        info = pa.get_device_info_by_index(int(device))
+        if info.get("maxInputChannels", 0) <= 0:
+            raise RuntimeError("Selected device is not an input device.")
+        return info
+    info = _find_device_by_name(pa, str(device), require_input=True)
+    if info is None:
+        _list_devices(pa)
+        raise RuntimeError("No matching input device found.")
+    return info
+
+
+def _find_loopback_for_output(pa, output_info):
+    for loop_info in pa.get_loopback_device_info_generator():
+        if output_info["name"] in loop_info["name"]:
+            return loop_info
+    raise RuntimeError("Loopback device for selected output not found.")
+
+
+def _find_loopback_device(pa, device):
+    if device is None:
+        out_info = _get_default_output(pa)
+        return _find_loopback_for_output(pa, out_info)
 
     if isinstance(device, int) or (isinstance(device, str) and device.isdigit()):
-        idx = int(device)
-        dev = devices[idx]
-        if not is_wasapi(dev):
-            raise RuntimeError("Selected device is not WASAPI. Use a WASAPI output device.")
-        if not is_output(dev):
-            raise RuntimeError("Selected device is not an output device for loopback.")
-        return idx
+        info = pa.get_device_info_by_index(int(device))
+        if _is_loopback_device(info):
+            return info
+        if info.get("maxOutputChannels", 0) > 0:
+            return _find_loopback_for_output(pa, info)
+        raise RuntimeError("Selected device is not an output/loopback device.")
 
-    needle = str(device).lower()
-    for idx, dev in enumerate(devices):
-        if needle in dev["name"].lower() and is_wasapi(dev) and is_output(dev):
-            return idx
-    raise RuntimeError("No matching WASAPI output device for loopback.")
+    device_str = str(device)
+    loop_info = _find_device_by_name(
+        pa, device_str, require_input=True, require_loopback=True
+    )
+    if loop_info is not None:
+        return loop_info
+    out_info = _find_device_by_name(pa, device_str, require_output=True)
+    if out_info is not None:
+        return _find_loopback_for_output(pa, out_info)
+    _list_devices(pa)
+    raise RuntimeError("No matching output/loopback device found.")
 
 
-def pick_input_samplerate(target_sr, device, channels, extra_settings):
-    if target_sr is None:
-        device_info = sd.query_devices(device)
-        return int(device_info["default_samplerate"])
-    try:
-        sd.check_input_settings(
-            device=device,
-            channels=channels,
-            samplerate=target_sr,
-            extra_settings=extra_settings,
-        )
-        return target_sr
-    except Exception:
-        device_info = sd.query_devices(device)
-        fallback_sr = int(device_info["default_samplerate"])
-        key = (
-            device_info["name"],
-            device_info["hostapi"],
-            channels,
-            target_sr,
-            bool(extra_settings),
-        )
-        if key not in _WARNED_SAMPLERATES:
-            print(
-                f"Requested samplerate {target_sr} not supported; using {fallback_sr}."
-            )
-            _WARNED_SAMPLERATES.add(key)
-        return fallback_sr
+def _read_stream_frames(stream, total_frames):
+    chunks = []
+    recorded_frames = 0
+    while recorded_frames < total_frames:
+        frames = min(FRAMES_PER_BUFFER, total_frames - recorded_frames)
+        data = stream.read(frames, exception_on_overflow=False)
+        chunks.append(data)
+        recorded_frames += frames
+    return b"".join(chunks)
+
+
+def _bytes_to_float32(data_bytes, channels):
+    if not data_bytes:
+        return np.zeros((0, channels), dtype="float32")
+    data_i16 = np.frombuffer(data_bytes, dtype=np.int16)
+    if channels > 1:
+        data_i16 = data_i16.reshape((-1, channels))
+    return (data_i16.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
 
 
 def record_audio(duration_s, target_sr, device=None, loopback=False):
-    extra_settings = None
-    channels = 1
-    if loopback:
-        if not hasattr(sd, "WasapiSettings"):
-            raise RuntimeError("WASAPI loopback is only supported on Windows.")
-        extra_settings = sd.WasapiSettings(True)
-        device = resolve_loopback_device(device)
-        channels = 2
+    pa = pyaudio.PyAudio()
+    try:
+        if loopback:
+            dev_info = _find_loopback_device(pa, device)
+            max_ch = int(dev_info.get("maxInputChannels", 2))
+            channels = 2 if max_ch >= 2 else 1
+        else:
+            dev_info = _find_input_device(pa, device)
+            max_ch = int(dev_info.get("maxInputChannels", 1))
+            channels = 1 if max_ch >= 1 else max_ch
 
-    input_sr = pick_input_samplerate(target_sr, device, channels, extra_settings)
-    frames = int(duration_s * input_sr)
-    recording = sd.rec(
-        frames,
-        samplerate=input_sr,
-        channels=channels,
-        dtype="float32",
-        device=device,
-        extra_settings=extra_settings,
-    )
-    sd.wait()
-    audio = recording.squeeze()
+        if channels <= 0:
+            raise RuntimeError("Selected device does not expose any usable channels.")
+
+        default_sr = int(dev_info.get("defaultSampleRate", 44100))
+        requested_sr = int(target_sr) if target_sr is not None else default_sr
+        samplerate = requested_sr
+
+        stream = None
+        try:
+            stream = pa.open(
+                format=SAMPLE_FORMAT,
+                channels=channels,
+                rate=samplerate,
+                input=True,
+                input_device_index=dev_info["index"],
+                frames_per_buffer=FRAMES_PER_BUFFER,
+            )
+        except Exception:
+            if requested_sr != default_sr:
+                samplerate = default_sr
+                stream = pa.open(
+                    format=SAMPLE_FORMAT,
+                    channels=channels,
+                    rate=samplerate,
+                    input=True,
+                    input_device_index=dev_info["index"],
+                    frames_per_buffer=FRAMES_PER_BUFFER,
+                )
+                key = (dev_info["name"], channels, requested_sr, default_sr)
+                if key not in _WARNED_SAMPLERATES:
+                    print(
+                        f"Requested samplerate {requested_sr} not supported; using {default_sr}."
+                    )
+                    _WARNED_SAMPLERATES.add(key)
+            else:
+                raise
+
+        try:
+            total_frames = int(duration_s * samplerate)
+            raw = _read_stream_frames(stream, total_frames)
+        finally:
+            if stream is not None:
+                stream.stop_stream()
+                stream.close()
+    finally:
+        pa.terminate()
+
+    audio = _bytes_to_float32(raw, channels)
     if audio.ndim > 1:
         audio = np.mean(audio, axis=1)
+    input_sr = samplerate
     if target_sr is not None and input_sr != target_sr:
         audio = librosa.resample(audio, orig_sr=input_sr, target_sr=target_sr)
         input_sr = target_sr
@@ -348,7 +435,12 @@ def parse_args():
     parser.add_argument(
         "--mic-device",
         default=DEFAULT_MIC_DEVICE,
-        help="Input device name or index for --mic. For --loopback, use an output device.",
+        help="Input device name or index for --mic.",
+    )
+    parser.add_argument(
+        "--output-device",
+        default=None,
+        help="Output device name or index for --loopback/--system-audio.",
     )
     parser.add_argument(
         "--list-devices",
@@ -358,7 +450,12 @@ def parse_args():
     parser.add_argument(
         "--loopback",
         action="store_true",
-        help="Use WASAPI loopback to capture system audio (requires --mic).",
+        help="Use WASAPI loopback to capture system audio.",
+    )
+    parser.add_argument(
+        "--system-audio",
+        action="store_true",
+        help="Convenience flag: capture system audio (same as --loopback --mic).",
     )
     parser.add_argument(
         "--model-id",
@@ -428,12 +525,15 @@ def main():
     if args.list_devices:
         list_devices()
         return
+    if args.system_audio:
+        args.mic = True
+        args.loopback = True
     if args.mic and args.audio:
         raise ValueError("Use either an audio file or --mic, not both.")
     if not args.mic and not args.audio:
         raise ValueError("Provide an audio file or use --mic.")
     if args.loopback and not args.mic:
-        raise ValueError("--loopback requires --mic.")
+        args.mic = True
 
     # Apply speed/quality presets (override conflicting params).
     if args.preset == "fast":
@@ -462,6 +562,13 @@ def main():
         or str(args.mic_device).strip().lower() in ("", "default", "system")
         else args.mic_device
     )
+    output_device = (
+        None
+        if args.output_device is None
+        or str(args.output_device).strip().lower() in ("", "default", "system")
+        else args.output_device
+    )
+    capture_device = output_device if args.loopback else mic_device
 
     if args.mic:
         transcriber = WhisperOVTranscriber(
@@ -484,7 +591,7 @@ def main():
                 audio, sr = record_audio(
                     duration_s=args.record_chunk,
                     target_sr=transcriber.target_sr,
-                    device=mic_device,
+                    device=capture_device,
                     loopback=args.loopback,
                 )
                 # Block instead of dropping to guarantee no chunks are skipped.
@@ -513,7 +620,7 @@ def main():
             stop_event.set()
             prod_t.join()
             cons_t.join()
-            return
+        return
     else:
         if not os.path.exists(args.audio):
             raise FileNotFoundError(f"Audio file not found: {args.audio}")
