@@ -23,9 +23,11 @@ class Worker(QtCore.QObject):
     def __init__(self):
         super().__init__()
         self._stop = threading.Event()
-        self._work_q: Queue = Queue()
+        self._work_q_short: Queue = Queue()
+        self._work_q_long: Queue = Queue()
         self._threads: list[threading.Thread] = []
-        self._pipeline: SpeechToEnglishPipeline | None = None
+        self._pipeline_short: SpeechToEnglishPipeline | None = None
+        self._pipeline_long: SpeechToEnglishPipeline | None = None
         self._use_loopback = False
         self._chunk_seconds = 2.5
         self._concat_chunks = 3
@@ -49,16 +51,32 @@ class Worker(QtCore.QObject):
 
     def _init_and_run(self, source_lang: str):
         try:
-            transcriber = WhisperOVTranscriber(language=source_lang, task="transcribe")
-            translator = JaToEnTranslator() if source_lang == "ja" else EnToJaTranslator()
-            self._pipeline = SpeechToEnglishPipeline(transcriber, translator)
+            transcriber_short = WhisperOVTranscriber(
+                language=source_lang, task="transcribe"
+            )
+            transcriber_long = WhisperOVTranscriber(
+                language=source_lang, task="transcribe"
+            )
+            translator_short = (
+                JaToEnTranslator() if source_lang == "ja" else EnToJaTranslator()
+            )
+            translator_long = (
+                JaToEnTranslator() if source_lang == "ja" else EnToJaTranslator()
+            )
+            self._pipeline_short = SpeechToEnglishPipeline(
+                transcriber_short, translator_short
+            )
+            self._pipeline_long = SpeechToEnglishPipeline(
+                transcriber_long, translator_long
+            )
         except Exception as exc:
             self.error.emit(str(exc))
             self.status.emit("Idle")
             return
         self._threads = [
             threading.Thread(target=self._producer, daemon=True),
-            threading.Thread(target=self._consumer, daemon=True),
+            threading.Thread(target=self._consumer_short, daemon=True),
+            threading.Thread(target=self._consumer_long, daemon=True),
         ]
         for t in self._threads:
             t.start()
@@ -72,34 +90,47 @@ class Worker(QtCore.QObject):
         for t in self._threads:
             t.join(timeout=1.0)
         self._threads = []
-        self._pipeline = None
+        self._pipeline_short = None
+        self._pipeline_long = None
         self.status.emit("Idle")
 
     def _producer(self):
-        pipeline = self._pipeline
-        if pipeline is None:
+        pipeline_short = self._pipeline_short
+        if pipeline_short is None:
             return
-        transcriber = pipeline.recognizer
+        transcriber = pipeline_short.recognizer
         while not self._stop.is_set():
             audio, sr = record_audio(
                 duration_s=self._chunk_seconds,
                 target_sr=transcriber.target_sr,
                 loopback=self._use_loopback,
             )
-            self._work_q.put((audio, sr))
+            self._work_q_short.put((audio, sr))
+            self._work_q_long.put((audio, sr))
 
-    def _consumer(self):
-        while not self._stop.is_set() or not self._work_q.empty():
-            pipeline = self._pipeline
+    def _consumer_short(self):
+        while not self._stop.is_set() or not self._work_q_short.empty():
+            pipeline = self._pipeline_short
             if pipeline is None:
                 break
             try:
-                audio, sr = self._work_q.get(timeout=0.5)
+                audio, sr = self._work_q_short.get(timeout=0.5)
             except Empty:
                 continue
             jp_short = pipeline.recognizer.transcribe_array(audio, sr)
             en_short = pipeline.translator.translate(jp_short) if jp_short else ""
             self.text_ready_short.emit(jp_short, en_short)
+            self._work_q_short.task_done()
+
+    def _consumer_long(self):
+        while not self._stop.is_set() or not self._work_q_long.empty():
+            pipeline = self._pipeline_long
+            if pipeline is None:
+                break
+            try:
+                audio, sr = self._work_q_long.get(timeout=0.5)
+            except Empty:
+                continue
             self._audio_buf.append(audio)
             while len(self._audio_buf) > self._concat_chunks:
                 self._audio_buf.popleft()
@@ -108,7 +139,7 @@ class Worker(QtCore.QObject):
             en = pipeline.translator.translate(jp) if jp else ""
             replace = len(self._audio_buf) > 1
             self.text_ready_long.emit(jp, en, replace)
-            self._work_q.task_done()
+            self._work_q_long.task_done()
 
 
 class MainWindow(QtWidgets.QMainWindow):
