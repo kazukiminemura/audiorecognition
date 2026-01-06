@@ -1,6 +1,11 @@
 import sys
 import threading
+import math
+from collections import deque
 from queue import Queue, Empty
+
+import numpy as np
+import time
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -10,7 +15,8 @@ from transcribe import WhisperOVTranscriber, record_audio
 
 
 class Worker(QtCore.QObject):
-    text_ready = QtCore.Signal(str, str)
+    text_ready_short = QtCore.Signal(str, str)
+    text_ready_long = QtCore.Signal(str, str, bool)
     status = QtCore.Signal(str)
     error = QtCore.Signal(str)
 
@@ -21,12 +27,19 @@ class Worker(QtCore.QObject):
         self._threads: list[threading.Thread] = []
         self._pipeline: SpeechToEnglishPipeline | None = None
         self._use_loopback = False
+        self._chunk_seconds = 2.5
+        self._concat_chunks = 3
+        self._audio_buf: deque[np.ndarray] = deque()
         self._init_thread: threading.Thread | None = None
 
-    def start(self, use_loopback: bool, source_lang: str):
+    def start(self, use_loopback: bool, source_lang: str, chunk_seconds: float):
         if self._threads:
             return
         self._use_loopback = use_loopback
+        self._chunk_seconds = float(chunk_seconds)
+        window_seconds = max(6.0, self._chunk_seconds * 2)
+        self._concat_chunks = max(2, int(math.ceil(window_seconds / self._chunk_seconds)))
+        self._audio_buf.clear()
         self._stop.clear()
         self.status.emit("Starting...")
         self._init_thread = threading.Thread(
@@ -63,26 +76,38 @@ class Worker(QtCore.QObject):
         self.status.emit("Idle")
 
     def _producer(self):
-        assert self._pipeline is not None
-        transcriber = self._pipeline.recognizer
+        pipeline = self._pipeline
+        if pipeline is None:
+            return
+        transcriber = pipeline.recognizer
         while not self._stop.is_set():
             audio, sr = record_audio(
-                duration_s=4.0,
+                duration_s=self._chunk_seconds,
                 target_sr=transcriber.target_sr,
                 loopback=self._use_loopback,
             )
             self._work_q.put((audio, sr))
 
     def _consumer(self):
-        assert self._pipeline is not None
         while not self._stop.is_set() or not self._work_q.empty():
+            pipeline = self._pipeline
+            if pipeline is None:
+                break
             try:
                 audio, sr = self._work_q.get(timeout=0.5)
             except Empty:
                 continue
-            jp = self._pipeline.recognizer.transcribe_array(audio, sr)
-            en = self._pipeline.translator.translate(jp) if jp else ""
-            self.text_ready.emit(jp, en)
+            jp_short = pipeline.recognizer.transcribe_array(audio, sr)
+            en_short = pipeline.translator.translate(jp_short) if jp_short else ""
+            self.text_ready_short.emit(jp_short, en_short)
+            self._audio_buf.append(audio)
+            while len(self._audio_buf) > self._concat_chunks:
+                self._audio_buf.popleft()
+            concat_audio = np.concatenate(list(self._audio_buf), axis=0)
+            jp = pipeline.recognizer.transcribe_array(concat_audio, sr)
+            en = pipeline.translator.translate(jp) if jp else ""
+            replace = len(self._audio_buf) > 1
+            self.text_ready_long.emit(jp, en, replace)
             self._work_q.task_done()
 
 
@@ -93,7 +118,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(920, 680)
 
         self.worker = Worker()
-        self.worker.text_ready.connect(self._append_text)
+        self.worker.text_ready_short.connect(self._append_short)
+        self.worker.text_ready_long.connect(self._append_long)
         self.worker.status.connect(self._set_status)
         self.worker.error.connect(self._show_error)
 
@@ -113,6 +139,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.system_audio = QtWidgets.QCheckBox("System Audio")
         self.lang_select = QtWidgets.QComboBox()
         self.lang_select.addItems(["Japanese -> English", "English -> Japanese"])
+        self.chunk_spin = QtWidgets.QDoubleSpinBox()
+        self.chunk_spin.setRange(0.5, 10.0)
+        self.chunk_spin.setSingleStep(0.5)
+        self.chunk_spin.setValue(2.5)
+        self.chunk_spin.setSuffix(" s")
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setFixedHeight(10)
@@ -129,20 +160,33 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_row.addWidget(self.system_audio)
         btn_row.addSpacing(8)
         btn_row.addWidget(self.lang_select)
+        btn_row.addSpacing(8)
+        btn_row.addWidget(QtWidgets.QLabel("Chunk"))
+        btn_row.addWidget(self.chunk_spin)
         btn_row.addStretch(1)
         btn_row.addWidget(self.progress)
         btn_row.addSpacing(8)
         btn_row.addWidget(self.status_lbl)
 
-        jp_label = QtWidgets.QLabel("Japanese (recognized)")
+        jp_label = QtWidgets.QLabel("Short (single chunk) - Japanese")
         jp_label.setObjectName("Section")
         self.jp_text = QtWidgets.QPlainTextEdit()
         self.jp_text.setReadOnly(True)
 
-        en_label = QtWidgets.QLabel("English (translated)")
+        en_label = QtWidgets.QLabel("Short (single chunk) - English")
         en_label.setObjectName("Section")
         self.en_text = QtWidgets.QPlainTextEdit()
         self.en_text.setReadOnly(True)
+
+        jp_long_label = QtWidgets.QLabel("Long (concatenated) - Japanese")
+        jp_long_label.setObjectName("Section")
+        self.jp_long_text = QtWidgets.QPlainTextEdit()
+        self.jp_long_text.setReadOnly(True)
+
+        en_long_label = QtWidgets.QLabel("Long (concatenated) - English")
+        en_long_label.setObjectName("Section")
+        self.en_long_text = QtWidgets.QPlainTextEdit()
+        self.en_long_text.setReadOnly(True)
 
         layout.addWidget(title)
         layout.addLayout(btn_row)
@@ -150,8 +194,18 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.jp_text, 1)
         layout.addWidget(en_label)
         layout.addWidget(self.en_text, 1)
+        layout.addWidget(jp_long_label)
+        layout.addWidget(self.jp_long_text, 1)
+        layout.addWidget(en_long_label)
+        layout.addWidget(self.en_long_text, 1)
 
         self._apply_style()
+        self._jp_segments: list[str] = []
+        self._en_segments: list[str] = []
+        self._jp_long_segments: list[str] = []
+        self._en_long_segments: list[str] = []
+        self._last_update_ts = 0.0
+        self._update_count = 0
 
     def closeEvent(self, event):
         self.worker.stop()
@@ -188,9 +242,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_lbl.setText("Starting...")
         self.system_audio.setEnabled(False)
         self.lang_select.setEnabled(False)
+        self.chunk_spin.setEnabled(False)
         self.progress.setVisible(True)
         source_lang = "ja" if self.lang_select.currentIndex() == 0 else "en"
-        self.worker.start(use_loopback=self.system_audio.isChecked(), source_lang=source_lang)
+        self.worker.start(
+            use_loopback=self.system_audio.isChecked(),
+            source_lang=source_lang,
+            chunk_seconds=self.chunk_spin.value(),
+        )
 
     def _stop(self):
         self.start_btn.setEnabled(True)
@@ -198,11 +257,42 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.stop()
 
     @QtCore.Slot(str, str)
-    def _append_text(self, jp: str, en: str):
+    def _append_short(self, jp: str, en: str):
         if jp:
-            self.jp_text.appendPlainText(jp)
+            self._jp_segments.append(jp)
+            self.jp_text.setPlainText("\n".join(self._jp_segments))
+            self.jp_text.moveCursor(QtGui.QTextCursor.End)
         if en:
-            self.en_text.appendPlainText(en)
+            self._en_segments.append(en)
+            self.en_text.setPlainText("\n".join(self._en_segments))
+            self.en_text.moveCursor(QtGui.QTextCursor.End)
+
+    @QtCore.Slot(str, str, bool)
+    def _append_long(self, jp: str, en: str, replace: bool):
+        now = time.monotonic()
+        should_newline = False
+        if replace:
+            self._update_count += 1
+            if (now - self._last_update_ts) > 3.0 or self._update_count >= 3:
+                should_newline = True
+        else:
+            self._update_count = 0
+        self._last_update_ts = now
+
+        if jp:
+            if (replace and self._jp_long_segments) and not should_newline:
+                self._jp_long_segments[-1] = jp
+            else:
+                self._jp_long_segments.append(jp)
+            self.jp_long_text.setPlainText("\n".join(self._jp_long_segments))
+            self.jp_long_text.moveCursor(QtGui.QTextCursor.End)
+        if en:
+            if (replace and self._en_long_segments) and not should_newline:
+                self._en_long_segments[-1] = en
+            else:
+                self._en_long_segments.append(en)
+            self.en_long_text.setPlainText("\n".join(self._en_long_segments))
+            self.en_long_text.moveCursor(QtGui.QTextCursor.End)
 
     @QtCore.Slot(str)
     def _set_status(self, status: str):
@@ -213,6 +303,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.progress.setVisible(False)
             self.system_audio.setEnabled(True)
             self.lang_select.setEnabled(True)
+            self.chunk_spin.setEnabled(True)
         elif status == "Starting...":
             self.progress.setVisible(True)
 
