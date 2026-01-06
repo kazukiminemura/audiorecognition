@@ -49,6 +49,7 @@ exe = EXE(
     a.datas,
     [],
     name="audiorecognition",
+    icon=str(root / "deployment" / "icon.ico"),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
