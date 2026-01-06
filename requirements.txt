@@ -7,5 +7,4 @@ optimum-intel
 openvino
 torch
 sentencepiece
-sv-ttk
 PySide6

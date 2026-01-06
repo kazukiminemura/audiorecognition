@@ -5,13 +5,14 @@ from queue import Queue, Empty
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from pipeline import SpeechToEnglishPipeline
-from pipeline_impl import JaToEnTranslator
+from pipeline_impl import JaToEnTranslator, EnToJaTranslator
 from transcribe import WhisperOVTranscriber, record_audio
 
 
 class Worker(QtCore.QObject):
     text_ready = QtCore.Signal(str, str)
     status = QtCore.Signal(str)
+    error = QtCore.Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -20,14 +21,28 @@ class Worker(QtCore.QObject):
         self._threads: list[threading.Thread] = []
         self._pipeline: SpeechToEnglishPipeline | None = None
         self._use_loopback = False
+        self._init_thread: threading.Thread | None = None
 
-    def start(self, use_loopback: bool):
+    def start(self, use_loopback: bool, source_lang: str):
         if self._threads:
             return
         self._use_loopback = use_loopback
         self._stop.clear()
-        transcriber = WhisperOVTranscriber(language="ja", task="transcribe")
-        self._pipeline = SpeechToEnglishPipeline(transcriber, JaToEnTranslator())
+        self.status.emit("Starting...")
+        self._init_thread = threading.Thread(
+            target=self._init_and_run, args=(source_lang,), daemon=True
+        )
+        self._init_thread.start()
+
+    def _init_and_run(self, source_lang: str):
+        try:
+            transcriber = WhisperOVTranscriber(language=source_lang, task="transcribe")
+            translator = JaToEnTranslator() if source_lang == "ja" else EnToJaTranslator()
+            self._pipeline = SpeechToEnglishPipeline(transcriber, translator)
+        except Exception as exc:
+            self.error.emit(str(exc))
+            self.status.emit("Idle")
+            return
         self._threads = [
             threading.Thread(target=self._producer, daemon=True),
             threading.Thread(target=self._consumer, daemon=True),
@@ -80,6 +95,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker = Worker()
         self.worker.text_ready.connect(self._append_text)
         self.worker.status.connect(self._set_status)
+        self.worker.error.connect(self._show_error)
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -95,6 +111,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_btn = QtWidgets.QPushButton("Stop")
         self.stop_btn.setEnabled(False)
         self.system_audio = QtWidgets.QCheckBox("System Audio")
+        self.lang_select = QtWidgets.QComboBox()
+        self.lang_select.addItems(["Japanese -> English", "English -> Japanese"])
+        self.progress = QtWidgets.QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setFixedHeight(10)
+        self.progress.setVisible(False)
         self.status_lbl = QtWidgets.QLabel("Idle")
         self.status_lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
 
@@ -105,7 +127,11 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_row.addWidget(self.stop_btn)
         btn_row.addSpacing(8)
         btn_row.addWidget(self.system_audio)
+        btn_row.addSpacing(8)
+        btn_row.addWidget(self.lang_select)
         btn_row.addStretch(1)
+        btn_row.addWidget(self.progress)
+        btn_row.addSpacing(8)
         btn_row.addWidget(self.status_lbl)
 
         jp_label = QtWidgets.QLabel("Japanese (recognized)")
@@ -143,6 +169,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 padding: 6px 14px; border-radius: 6px;
             }
             QPushButton:disabled { background: #c9d1d9; color: #5b6b7a; }
+            QProgressBar {
+                border: 1px solid #d6dde6; border-radius: 5px;
+                background: #eef2f7;
+            }
+            QProgressBar::chunk { background: #0078d4; border-radius: 5px; }
             QPlainTextEdit {
                 background: white; border: 1px solid #d6dde6; border-radius: 6px;
                 padding: 6px;
@@ -155,7 +186,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.status_lbl.setText("Starting...")
-        self.worker.start(use_loopback=self.system_audio.isChecked())
+        self.system_audio.setEnabled(False)
+        self.lang_select.setEnabled(False)
+        self.progress.setVisible(True)
+        source_lang = "ja" if self.lang_select.currentIndex() == 0 else "en"
+        self.worker.start(use_loopback=self.system_audio.isChecked(), source_lang=source_lang)
 
     def _stop(self):
         self.start_btn.setEnabled(True)
@@ -172,6 +207,23 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(str)
     def _set_status(self, status: str):
         self.status_lbl.setText(status)
+        if status == "Listening":
+            self.progress.setVisible(False)
+        elif status in ("Idle", "Stopping..."):
+            self.progress.setVisible(False)
+            self.system_audio.setEnabled(True)
+            self.lang_select.setEnabled(True)
+        elif status == "Starting...":
+            self.progress.setVisible(True)
+
+    @QtCore.Slot(str)
+    def _show_error(self, message: str):
+        QtWidgets.QMessageBox.critical(self, "Error", message)
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.progress.setVisible(False)
+        self.system_audio.setEnabled(True)
+        self.lang_select.setEnabled(True)
 
 
 def main():
