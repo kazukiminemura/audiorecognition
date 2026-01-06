@@ -17,4 +17,5 @@ $spec = Join-Path $PSScriptRoot "audiorecognition.spec"
 & $venvPython -m pip install pyinstaller
 
 $env:AUDIOREC_ROOT = $root
+$env:PYTHONWARNINGS = "ignore:.*torch\\.distributed\\._sharding_spec.*:DeprecationWarning,ignore:.*torch\\.distributed\\._sharded_tensor.*:DeprecationWarning,ignore:.*torch\\.distributed\\._shard\\.checkpoint.*:DeprecationWarning"
 & $venvPython -m PyInstaller $spec

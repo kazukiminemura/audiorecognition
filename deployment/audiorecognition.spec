@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
+import warnings
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all
@@ -7,6 +8,22 @@ from PyInstaller.utils.hooks import collect_all
 root = Path(os.environ.get("AUDIOREC_ROOT", Path.cwd())).resolve()
 entrypoint = root / "ui.py"
 
+# Silence known torch deprecation warnings emitted during module collection.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*torch\.distributed\._sharding_spec.*",
+    category=DeprecationWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r".*torch\.distributed\._sharded_tensor.*",
+    category=DeprecationWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r".*torch\.distributed\._shard\.checkpoint.*",
+    category=DeprecationWarning,
+)
 datas = []
 binaries = []
 hiddenimports = []
@@ -38,7 +55,10 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        "tensorboard",
+        "torch.utils.tensorboard",
+    ],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

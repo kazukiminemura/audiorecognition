@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass
 from queue import Queue, Empty
 from typing import Callable
+from pathlib import Path
 
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -193,6 +194,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, engine: SpeechEngine):
         super().__init__()
         self.setWindowTitle("Speech -> English")
+        self.setWindowIcon(QtGui.QIcon(str((Path(__file__).resolve().parent / "deployment" / "icon.ico"))))
         self.resize(920, 680)
 
         self._engine = engine
@@ -213,6 +215,8 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_row = QtWidgets.QHBoxLayout()
         self.start_btn = QtWidgets.QPushButton("Start")
         self.stop_btn = QtWidgets.QPushButton("Stop")
+        self.save_btn = QtWidgets.QPushButton("Save Translation")
+        self.reset_btn = QtWidgets.QPushButton("Reset Text")
         self.stop_btn.setEnabled(False)
         self.system_audio = QtWidgets.QCheckBox("System Audio")
         self.lang_select = QtWidgets.QComboBox()
@@ -231,9 +235,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.start_btn.clicked.connect(self._start)
         self.stop_btn.clicked.connect(self._stop)
+        self.save_btn.clicked.connect(self._save_translation)
+        self.reset_btn.clicked.connect(self._reset_text)
 
         btn_row.addWidget(self.start_btn)
         btn_row.addWidget(self.stop_btn)
+        btn_row.addSpacing(4)
+        btn_row.addWidget(self.save_btn)
+        btn_row.addWidget(self.reset_btn)
         btn_row.addSpacing(8)
         btn_row.addWidget(self.system_audio)
         btn_row.addSpacing(8)
@@ -283,6 +292,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._long_jp = TextAccumulator()
         self._long_en = TextAccumulator()
         self._long_policy = LongUpdatePolicy()
+        self._current_source_lang = "ja"
 
     def closeEvent(self, event):
         self._engine.stop()
@@ -315,6 +325,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _start(self):
         source_lang = "ja" if self.lang_select.currentIndex() == 0 else "en"
+        self._current_source_lang = source_lang
         cfg = RunConfig(
             use_loopback=self.system_audio.isChecked(),
             source_lang=source_lang,
@@ -324,6 +335,44 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _stop(self):
         self._engine.stop()
+
+    def _reset_text(self):
+        self._short_jp = TextAccumulator()
+        self._short_en = TextAccumulator()
+        self._long_jp = TextAccumulator()
+        self._long_en = TextAccumulator()
+        self._long_policy = LongUpdatePolicy()
+        self.jp_text.clear()
+        self.en_text.clear()
+        self.jp_long_text.clear()
+        self.en_long_text.clear()
+
+    def _save_translation(self):
+        if self._current_source_lang == "ja":
+            text = self._long_en.render()
+            label = "English"
+        else:
+            text = self._long_jp.render()
+            label = "Japanese"
+
+        if not text.strip():
+            QtWidgets.QMessageBox.information(self, "No text", "Translation text is empty.")
+            return
+
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            f"Save Translation ({label})",
+            "",
+            "Text Files (*.txt);;All Files (*.*)",
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+        except OSError as exc:
+            QtWidgets.QMessageBox.critical(self, "Save failed", str(exc))
 
     @QtCore.Slot(str, str)
     def _append_short(self, jp: str, en: str):
