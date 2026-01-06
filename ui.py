@@ -194,7 +194,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, engine: SpeechEngine):
         super().__init__()
         self.setWindowTitle("Speech -> English")
-        self.setWindowIcon(QtGui.QIcon(str((Path(__file__).resolve().parent / "deployment" / "icon.ico"))))
+        self.setWindowIcon(QtGui.QIcon(str((Path(__file__).resolve().parent / "deployment" / "favicon.ico"))))
         self.resize(920, 680)
 
         self._engine = engine
