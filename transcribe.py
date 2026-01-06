@@ -9,16 +9,22 @@ import soundfile as sf
 import pyaudiowpatch as pyaudio
 from optimum.intel.openvino import OVModelForSpeechSeq2Seq
 from transformers import AutoProcessor
+from transformers.utils import logging as hf_logging
 
+from pipeline import SpeechToEnglishPipeline
+from pipeline_impl import JaToEnTranslator
+from settings import (
+    DEFAULT_MIC_DEVICE,
+    DEFAULT_MODEL_ID,
+    FIXED_SAMPLE_RATE,
+    FRAMES_PER_BUFFER,
+    MIC_INPUT_SAMPLE_RATE,
+    SAMPLE_FORMAT,
+    WARNED_DENOISE,
+)
 
-DEFAULT_MODEL_ID = "OpenVINO/whisper-large-v3-fp16-ov"
-_WARNED_SAMPLERATES = set()
-_WARNED_DENOISE = set()
-# Use None so PyAudio picks the OS default input device.
-DEFAULT_MIC_DEVICE = None
-
-SAMPLE_FORMAT = pyaudio.paInt16
-FRAMES_PER_BUFFER = 1024
+# Reduce noisy Hugging Face/Transformers warnings for this CLI.
+hf_logging.set_verbosity_error()
 
 
 def load_audio(path, target_sr):
@@ -173,39 +179,19 @@ def record_audio(duration_s, target_sr, device=None, loopback=False):
         if channels <= 0:
             raise RuntimeError("Selected device does not expose any usable channels.")
 
-        default_sr = int(dev_info.get("defaultSampleRate", 44100))
-        requested_sr = int(target_sr) if target_sr is not None else default_sr
-        samplerate = requested_sr
-
-        stream = None
-        try:
-            stream = pa.open(
-                format=SAMPLE_FORMAT,
-                channels=channels,
-                rate=samplerate,
-                input=True,
-                input_device_index=dev_info["index"],
-                frames_per_buffer=FRAMES_PER_BUFFER,
-            )
-        except Exception:
-            if requested_sr != default_sr:
-                samplerate = default_sr
-                stream = pa.open(
-                    format=SAMPLE_FORMAT,
-                    channels=channels,
-                    rate=samplerate,
-                    input=True,
-                    input_device_index=dev_info["index"],
-                    frames_per_buffer=FRAMES_PER_BUFFER,
-                )
-                key = (dev_info["name"], channels, requested_sr, default_sr)
-                if key not in _WARNED_SAMPLERATES:
-                    print(
-                        f"Requested samplerate {requested_sr} not supported; using {default_sr}."
-                    )
-                    _WARNED_SAMPLERATES.add(key)
-            else:
-                raise
+        samplerate = (
+            int(dev_info.get("defaultSampleRate", MIC_INPUT_SAMPLE_RATE))
+            if loopback
+            else MIC_INPUT_SAMPLE_RATE
+        )
+        stream = pa.open(
+            format=SAMPLE_FORMAT,
+            channels=channels,
+            rate=samplerate,
+            input=True,
+            input_device_index=dev_info["index"],
+            frames_per_buffer=FRAMES_PER_BUFFER,
+        )
 
         try:
             total_frames = int(duration_s * samplerate)
@@ -276,9 +262,9 @@ def denoise_audio(audio, sr, noise_seconds=0.5):
         return cleaned.astype(np.float32)
     except Exception as exc:
         key = type(exc).__name__
-        if key not in _WARNED_DENOISE:
+        if key not in WARNED_DENOISE:
             print(f"Noise reduction failed; using raw audio. ({exc})")
-            _WARNED_DENOISE.add(key)
+            WARNED_DENOISE.add(key)
         return audio
 
 
@@ -298,7 +284,7 @@ def prepare_model(model_id, device):
         device=device,
         compile=True,
     )
-    target_sr = processor.feature_extractor.sampling_rate
+    target_sr = FIXED_SAMPLE_RATE
     return processor, model, target_sr
 
 
@@ -371,6 +357,10 @@ def transcribe_array(
     denoise,
     num_beams,
 ):
+    target_sr = FIXED_SAMPLE_RATE
+    if sr != target_sr:
+        audio = librosa.resample(audio, orig_sr=sr, target_sr=target_sr)
+        sr = target_sr
     forced_decoder_ids = build_forced_decoder_ids(processor, language, task)
 
     segments = []
@@ -516,6 +506,11 @@ def parse_args():
         default=4.0,
         help="Per-chunk recording duration in seconds when using --mic.",
     )
+    parser.add_argument(
+        "--translate",
+        action="store_true",
+        help="Translate recognized Japanese to English.",
+    )
     parser.set_defaults(denoise=True)
     return parser.parse_args()
 
@@ -582,6 +577,11 @@ def main():
             denoise=args.denoise,
             num_beams=args.num_beams,
         )
+        pipeline = (
+            SpeechToEnglishPipeline(transcriber, JaToEnTranslator())
+            if args.translate
+            else None
+        )
         print("Ready")
         stop_event = threading.Event()
         work_q: Queue[tuple[np.ndarray, int]] = Queue()
@@ -603,7 +603,7 @@ def main():
                     audio, sr = work_q.get(timeout=0.5)
                 except Empty:
                     continue
-                text = transcriber.transcribe_array(audio, sr)
+                text = pipeline.run(audio, sr) if pipeline else transcriber.transcribe_array(audio, sr)
                 if text:
                     print(text)
                 work_q.task_done()
@@ -624,18 +624,34 @@ def main():
     else:
         if not os.path.exists(args.audio):
             raise FileNotFoundError(f"Audio file not found: {args.audio}")
-        text = transcribe_audio(
-            model_id=args.model_id,
-            audio_path=args.audio,
-            device=args.device,
-            language=args.language,
-            task=args.task,
-            chunk_length_s=args.chunk_length,
-            stride_length_s=args.stride,
-            max_new_tokens=args.max_new_tokens,
-            denoise=args.denoise,
-            num_beams=args.num_beams,
-        )
+        if args.translate:
+            transcriber = WhisperOVTranscriber(
+                model_id=args.model_id,
+                device=args.device,
+                language=args.language,
+                task=args.task,
+                chunk_length_s=args.chunk_length,
+                stride_length_s=args.stride,
+                max_new_tokens=args.max_new_tokens,
+                denoise=args.denoise,
+                num_beams=args.num_beams,
+            )
+            pipeline = SpeechToEnglishPipeline(transcriber, JaToEnTranslator())
+            audio, sr = load_audio(args.audio, target_sr=transcriber.target_sr)
+            text = pipeline.run(audio, sr)
+        else:
+            text = transcribe_audio(
+                model_id=args.model_id,
+                audio_path=args.audio,
+                device=args.device,
+                language=args.language,
+                task=args.task,
+                chunk_length_s=args.chunk_length,
+                stride_length_s=args.stride,
+                max_new_tokens=args.max_new_tokens,
+                denoise=args.denoise,
+                num_beams=args.num_beams,
+            )
     print(text)
 
 
