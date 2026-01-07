@@ -24,6 +24,7 @@ class RunConfig:
     chunk_seconds: float
     enable_short: bool
     enable_long: bool
+    enable_translation: bool
 
 
 class PipelineFactory:
@@ -48,6 +49,8 @@ class AudioProducer:
         out_short: Optional[Queue],
         out_long: Optional[Queue],
         target_sr: int,
+        enable_short: Callable[[], bool],
+        enable_long: Callable[[], bool],
     ):
         while not stop_event.is_set():
             audio, sr = self._record_fn(
@@ -55,9 +58,9 @@ class AudioProducer:
                 target_sr=target_sr,
                 loopback=cfg.use_loopback,
             )
-            if out_short is not None:
+            if out_short is not None and enable_short():
                 out_short.put((audio, sr))
-            if out_long is not None:
+            if out_long is not None and enable_long():
                 out_long.put((audio, sr))
 
 
@@ -65,14 +68,20 @@ class ShortProcessor:
     def __init__(self, pipeline: SpeechToEnglishPipeline):
         self._pipeline = pipeline
 
-    def run(self, stop_event: threading.Event, in_q: Queue, emit: Callable[[str, str], None]):
+    def run(
+        self,
+        stop_event: threading.Event,
+        in_q: Queue,
+        emit: Callable[[str, str], None],
+        enable_translation: Callable[[], bool],
+    ):
         while not stop_event.is_set() or not in_q.empty():
             try:
                 audio, sr = in_q.get(timeout=0.5)
             except Empty:
                 continue
             jp = self._pipeline.recognizer.transcribe_array(audio, sr)
-            en = self._pipeline.translator.translate(jp) if jp else ""
+            en = self._pipeline.translator.translate(jp) if jp and enable_translation() else ""
             emit(jp, en)
             in_q.task_done()
 
@@ -83,7 +92,13 @@ class LongProcessor:
         self._concat_chunks = concat_chunks
         self._buffer: deque[np.ndarray] = deque()
 
-    def run(self, stop_event: threading.Event, in_q: Queue, emit: Callable[[str, str, bool], None]):
+    def run(
+        self,
+        stop_event: threading.Event,
+        in_q: Queue,
+        emit: Callable[[str, str, bool], None],
+        enable_translation: Callable[[], bool],
+    ):
         while not stop_event.is_set() or not in_q.empty():
             try:
                 audio, sr = in_q.get(timeout=0.5)
@@ -94,7 +109,7 @@ class LongProcessor:
                 self._buffer.popleft()
             concat_audio = np.concatenate(list(self._buffer), axis=0)
             jp = self._pipeline.recognizer.transcribe_array(concat_audio, sr)
-            en = self._pipeline.translator.translate(jp) if jp else ""
+            en = self._pipeline.translator.translate(jp) if jp and enable_translation() else ""
             replace = len(self._buffer) > 1
             emit(jp, en, replace)
             in_q.task_done()
@@ -114,6 +129,27 @@ class SpeechEngine(QtCore.QObject):
         self._threads: list[threading.Thread] = []
         self._work_q_short: Queue = Queue()
         self._work_q_long: Queue = Queue()
+        self._translate_enabled = True
+        self._short_enabled = True
+        self._long_enabled = True
+
+    def set_translation_enabled(self, enabled: bool):
+        self._translate_enabled = enabled
+
+    def _is_translation_enabled(self) -> bool:
+        return self._translate_enabled
+
+    def set_short_enabled(self, enabled: bool):
+        self._short_enabled = enabled
+
+    def set_long_enabled(self, enabled: bool):
+        self._long_enabled = enabled
+
+    def _is_short_enabled(self) -> bool:
+        return self._short_enabled
+
+    def _is_long_enabled(self) -> bool:
+        return self._long_enabled
 
     def start(self, cfg: RunConfig):
         if self._threads:
@@ -144,8 +180,8 @@ class SpeechEngine(QtCore.QObject):
         window_seconds = max(6.0, cfg.chunk_seconds * 2)
         concat_chunks = max(2, int(math.ceil(window_seconds / cfg.chunk_seconds)))
 
-        out_short = self._work_q_short if cfg.enable_short else None
-        out_long = self._work_q_long if cfg.enable_long else None
+        out_short = self._work_q_short
+        out_long = self._work_q_long
         producer_t = threading.Thread(
             target=self._producer.run,
             args=(
@@ -154,24 +190,32 @@ class SpeechEngine(QtCore.QObject):
                 out_short,
                 out_long,
                 pipeline_short.recognizer.target_sr,
+                self._is_short_enabled,
+                self._is_long_enabled,
             ),
             daemon=True,
         )
-        self._threads = [producer_t]
-        if cfg.enable_short:
-            short_t = threading.Thread(
-                target=ShortProcessor(pipeline_short).run,
-                args=(self._stop, self._work_q_short, self.text_ready_short.emit),
-                daemon=True,
-            )
-            self._threads.append(short_t)
-        if cfg.enable_long:
-            long_t = threading.Thread(
-                target=LongProcessor(pipeline_long, concat_chunks).run,
-                args=(self._stop, self._work_q_long, self.text_ready_long.emit),
-                daemon=True,
-            )
-            self._threads.append(long_t)
+        short_t = threading.Thread(
+            target=ShortProcessor(pipeline_short).run,
+            args=(
+                self._stop,
+                self._work_q_short,
+                self.text_ready_short.emit,
+                self._is_translation_enabled,
+            ),
+            daemon=True,
+        )
+        long_t = threading.Thread(
+            target=LongProcessor(pipeline_long, concat_chunks).run,
+            args=(
+                self._stop,
+                self._work_q_long,
+                self.text_ready_long.emit,
+                self._is_translation_enabled,
+            ),
+            daemon=True,
+        )
+        self._threads = [producer_t, short_t, long_t]
         for t in self._threads:
             t.start()
         self.status.emit("Listening")
@@ -236,7 +280,8 @@ class MainWindow(QtWidgets.QMainWindow):
         title = QtWidgets.QLabel("Speech Recognition + Translation")
         title.setObjectName("Title")
 
-        btn_row = QtWidgets.QHBoxLayout()
+        btn_row_top = QtWidgets.QHBoxLayout()
+        btn_row_bottom = QtWidgets.QHBoxLayout()
         self.start_btn = QtWidgets.QPushButton("Start")
         self.stop_btn = QtWidgets.QPushButton("Stop")
         self.save_btn = QtWidgets.QPushButton("Save Script")
@@ -253,7 +298,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.short_toggle = QtWidgets.QCheckBox("Short")
         self.long_toggle = QtWidgets.QCheckBox("Long")
         self.short_toggle.setChecked(True)
-        self.long_toggle.setChecked(True)
+        self.long_toggle.setChecked(False)
+        self.long_toggle.setEnabled(False)
+        self.translate_toggle = QtWidgets.QCheckBox("Translate")
+        self.translate_toggle.setChecked(True)
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setFixedHeight(10)
@@ -265,26 +313,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_btn.clicked.connect(self._stop)
         self.save_btn.clicked.connect(self._save_script)
         self.reset_btn.clicked.connect(self._reset_text)
+        self.short_toggle.toggled.connect(self._engine.set_short_enabled)
+        self.long_toggle.toggled.connect(self._engine.set_long_enabled)
+        self.translate_toggle.toggled.connect(self._engine.set_translation_enabled)
 
-        btn_row.addWidget(self.start_btn)
-        btn_row.addWidget(self.stop_btn)
-        btn_row.addSpacing(4)
-        btn_row.addWidget(self.save_btn)
-        btn_row.addWidget(self.reset_btn)
-        btn_row.addSpacing(8)
-        btn_row.addWidget(self.system_audio)
-        btn_row.addSpacing(8)
-        btn_row.addWidget(self.lang_select)
-        btn_row.addSpacing(8)
-        btn_row.addWidget(QtWidgets.QLabel("Chunk"))
-        btn_row.addWidget(self.chunk_spin)
-        btn_row.addSpacing(8)
-        btn_row.addWidget(self.short_toggle)
-        btn_row.addWidget(self.long_toggle)
-        btn_row.addStretch(1)
-        btn_row.addWidget(self.progress)
-        btn_row.addSpacing(8)
-        btn_row.addWidget(self.status_lbl)
+        btn_row_top.addWidget(self.start_btn)
+        btn_row_top.addWidget(self.stop_btn)
+        btn_row_top.addSpacing(4)
+        btn_row_top.addWidget(self.save_btn)
+        btn_row_top.addWidget(self.reset_btn)
+        btn_row_top.addStretch(1)
+        btn_row_top.addWidget(self.progress)
+        btn_row_top.addSpacing(8)
+        btn_row_top.addWidget(self.status_lbl)
+
+        btn_row_bottom.addWidget(self.system_audio)
+        btn_row_bottom.addSpacing(8)
+        btn_row_bottom.addWidget(self.lang_select)
+        btn_row_bottom.addSpacing(8)
+        btn_row_bottom.addWidget(QtWidgets.QLabel("Chunk"))
+        btn_row_bottom.addWidget(self.chunk_spin)
+        btn_row_bottom.addSpacing(8)
+        btn_row_bottom.addWidget(self.short_toggle)
+        btn_row_bottom.addWidget(self.long_toggle)
+        btn_row_bottom.addWidget(self.translate_toggle)
+        btn_row_bottom.addStretch(1)
 
         jp_label = QtWidgets.QLabel("Short (single chunk) - Japanese")
         jp_label.setObjectName("Section")
@@ -307,7 +360,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.en_long_text.setReadOnly(True)
 
         layout.addWidget(title)
-        layout.addLayout(btn_row)
+        layout.addLayout(btn_row_top)
+        layout.addLayout(btn_row_bottom)
         layout.addWidget(jp_label)
         layout.addWidget(self.jp_text, 1)
         layout.addWidget(en_label)
@@ -366,7 +420,11 @@ class MainWindow(QtWidgets.QMainWindow):
             chunk_seconds=self.chunk_spin.value(),
             enable_short=self.short_toggle.isChecked(),
             enable_long=self.long_toggle.isChecked(),
+            enable_translation=self.translate_toggle.isChecked(),
         )
+        self._engine.set_short_enabled(cfg.enable_short)
+        self._engine.set_long_enabled(cfg.enable_long)
+        self._engine.set_translation_enabled(cfg.enable_translation)
         self._engine.start(cfg)
 
     def _stop(self):
