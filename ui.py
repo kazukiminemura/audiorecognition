@@ -6,7 +6,7 @@ from datetime import datetime
 from collections import deque
 from dataclasses import dataclass
 from queue import Queue, Empty
-from typing import Callable
+from typing import Callable, Optional
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +22,8 @@ class RunConfig:
     use_loopback: bool
     source_lang: str
     chunk_seconds: float
+    enable_short: bool
+    enable_long: bool
 
 
 class PipelineFactory:
@@ -39,15 +41,24 @@ class AudioProducer:
     def __init__(self, record_fn: Callable[..., tuple[np.ndarray, int]]):
         self._record_fn = record_fn
 
-    def run(self, stop_event: threading.Event, cfg: RunConfig, out_short: Queue, out_long: Queue, target_sr: int):
+    def run(
+        self,
+        stop_event: threading.Event,
+        cfg: RunConfig,
+        out_short: Optional[Queue],
+        out_long: Optional[Queue],
+        target_sr: int,
+    ):
         while not stop_event.is_set():
             audio, sr = self._record_fn(
                 duration_s=cfg.chunk_seconds,
                 target_sr=target_sr,
                 loopback=cfg.use_loopback,
             )
-            out_short.put((audio, sr))
-            out_long.put((audio, sr))
+            if out_short is not None:
+                out_short.put((audio, sr))
+            if out_long is not None:
+                out_long.put((audio, sr))
 
 
 class ShortProcessor:
@@ -133,28 +144,34 @@ class SpeechEngine(QtCore.QObject):
         window_seconds = max(6.0, cfg.chunk_seconds * 2)
         concat_chunks = max(2, int(math.ceil(window_seconds / cfg.chunk_seconds)))
 
+        out_short = self._work_q_short if cfg.enable_short else None
+        out_long = self._work_q_long if cfg.enable_long else None
         producer_t = threading.Thread(
             target=self._producer.run,
             args=(
                 self._stop,
                 cfg,
-                self._work_q_short,
-                self._work_q_long,
+                out_short,
+                out_long,
                 pipeline_short.recognizer.target_sr,
             ),
             daemon=True,
         )
-        short_t = threading.Thread(
-            target=ShortProcessor(pipeline_short).run,
-            args=(self._stop, self._work_q_short, self.text_ready_short.emit),
-            daemon=True,
-        )
-        long_t = threading.Thread(
-            target=LongProcessor(pipeline_long, concat_chunks).run,
-            args=(self._stop, self._work_q_long, self.text_ready_long.emit),
-            daemon=True,
-        )
-        self._threads = [producer_t, short_t, long_t]
+        self._threads = [producer_t]
+        if cfg.enable_short:
+            short_t = threading.Thread(
+                target=ShortProcessor(pipeline_short).run,
+                args=(self._stop, self._work_q_short, self.text_ready_short.emit),
+                daemon=True,
+            )
+            self._threads.append(short_t)
+        if cfg.enable_long:
+            long_t = threading.Thread(
+                target=LongProcessor(pipeline_long, concat_chunks).run,
+                args=(self._stop, self._work_q_long, self.text_ready_long.emit),
+                daemon=True,
+            )
+            self._threads.append(long_t)
         for t in self._threads:
             t.start()
         self.status.emit("Listening")
@@ -233,6 +250,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chunk_spin.setSingleStep(0.5)
         self.chunk_spin.setValue(1.0)
         self.chunk_spin.setSuffix(" s")
+        self.short_toggle = QtWidgets.QCheckBox("Short")
+        self.long_toggle = QtWidgets.QCheckBox("Long")
+        self.short_toggle.setChecked(True)
+        self.long_toggle.setChecked(True)
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setFixedHeight(10)
@@ -257,6 +278,9 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_row.addSpacing(8)
         btn_row.addWidget(QtWidgets.QLabel("Chunk"))
         btn_row.addWidget(self.chunk_spin)
+        btn_row.addSpacing(8)
+        btn_row.addWidget(self.short_toggle)
+        btn_row.addWidget(self.long_toggle)
         btn_row.addStretch(1)
         btn_row.addWidget(self.progress)
         btn_row.addSpacing(8)
@@ -331,12 +355,17 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _start(self):
+        if not (self.short_toggle.isChecked() or self.long_toggle.isChecked()):
+            QtWidgets.QMessageBox.information(self, "No mode", "Enable Short and/or Long.")
+            return
         source_lang = "ja" if self.lang_select.currentIndex() == 0 else "en"
         self._current_source_lang = source_lang
         cfg = RunConfig(
             use_loopback=self.system_audio.isChecked(),
             source_lang=source_lang,
             chunk_seconds=self.chunk_spin.value(),
+            enable_short=self.short_toggle.isChecked(),
+            enable_long=self.long_toggle.isChecked(),
         )
         self._engine.start(cfg)
 
