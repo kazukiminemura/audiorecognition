@@ -1,3 +1,12 @@
+--index-url https://download.pytorch.org/whl/xpu
+--extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us
+--extra-index-url https://pypi.org/simple
+
+torch==2.8.0+xpu
+torchvision==0.23.0+xpu
+torchaudio==2.8.0+xpu
+intel-extension-for-pytorch==2.8.10+xpu
+
 numpy
 soundfile
 librosa
@@ -5,6 +14,5 @@ pyaudiowpatch
 transformers
 optimum-intel
 openvino
-torch
 sentencepiece
 PySide6

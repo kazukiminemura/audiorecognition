@@ -2,6 +2,7 @@ import sys
 import threading
 import math
 import time
+from datetime import datetime
 from collections import deque
 from dataclasses import dataclass
 from queue import Queue, Empty
@@ -25,7 +26,11 @@ class RunConfig:
 
 class PipelineFactory:
     def create(self, source_lang: str) -> SpeechToEnglishPipeline:
-        transcriber = WhisperOVTranscriber(language=source_lang, task="transcribe")
+        transcriber = WhisperOVTranscriber(
+            language=source_lang,
+            task="transcribe",
+            device="GPU",
+        )
         translator = JaToEnTranslator() if source_lang == "ja" else EnToJaTranslator()
         return SpeechToEnglishPipeline(transcriber, translator)
 
@@ -194,7 +199,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, engine: SpeechEngine):
         super().__init__()
         self.setWindowTitle("Speech -> English")
-        self.setWindowIcon(QtGui.QIcon(str((Path(__file__).resolve().parent / "deployment" / "favicon.ico"))))
+        icon_path = _resource_path(Path("deployment") / "favicon.ico")
+        if icon_path.exists():
+            self.setWindowIcon(QtGui.QIcon(str(icon_path)))
         self.resize(920, 680)
 
         self._engine = engine
@@ -215,7 +222,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_row = QtWidgets.QHBoxLayout()
         self.start_btn = QtWidgets.QPushButton("Start")
         self.stop_btn = QtWidgets.QPushButton("Stop")
-        self.save_btn = QtWidgets.QPushButton("Save Translation")
+        self.save_btn = QtWidgets.QPushButton("Save Script")
         self.reset_btn = QtWidgets.QPushButton("Reset Text")
         self.stop_btn.setEnabled(False)
         self.system_audio = QtWidgets.QCheckBox("System Audio")
@@ -235,7 +242,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.start_btn.clicked.connect(self._start)
         self.stop_btn.clicked.connect(self._stop)
-        self.save_btn.clicked.connect(self._save_translation)
+        self.save_btn.clicked.connect(self._save_script)
         self.reset_btn.clicked.connect(self._reset_text)
 
         btn_row.addWidget(self.start_btn)
@@ -347,30 +354,42 @@ class MainWindow(QtWidgets.QMainWindow):
         self.jp_long_text.clear()
         self.en_long_text.clear()
 
-    def _save_translation(self):
+    def _save_script(self):
         if self._current_source_lang == "ja":
-            text = self._long_en.render()
-            label = "English"
+            short_source = self._short_jp.render()
+            short_trans = self._short_en.render()
+            long_source = self._long_jp.render()
+            long_trans = self._long_en.render()
+            src_label = "ja"
+            tgt_label = "en"
         else:
-            text = self._long_jp.render()
-            label = "Japanese"
+            short_source = self._short_en.render()
+            short_trans = self._short_jp.render()
+            long_source = self._long_en.render()
+            long_trans = self._long_jp.render()
+            src_label = "en"
+            tgt_label = "ja"
 
-        if not text.strip():
-            QtWidgets.QMessageBox.information(self, "No text", "Translation text is empty.")
+        if not (short_source.strip() or short_trans.strip() or long_source.strip() or long_trans.strip()):
+            QtWidgets.QMessageBox.information(self, "No text", "Speech recognition and translation are empty.")
             return
 
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            f"Save Translation ({label})",
-            "",
-            "Text Files (*.txt);;All Files (*.*)",
-        )
-        if not path:
+        out_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "Select folder to save scripts", "")
+        if not out_dir:
             return
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        files = [
+            (Path(out_dir) / f"{stamp}_short_source_{src_label}.txt", short_source),
+            (Path(out_dir) / f"{stamp}_short_translation_{tgt_label}.txt", short_trans),
+            (Path(out_dir) / f"{stamp}_long_source_{src_label}.txt", long_source),
+            (Path(out_dir) / f"{stamp}_long_translation_{tgt_label}.txt", long_trans),
+        ]
 
         try:
-            with open(path, "w", encoding="utf-8", newline="\n") as f:
-                f.write(text)
+            for path, text in files:
+                with open(path, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(text)
         except OSError as exc:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(exc))
 
@@ -433,6 +452,11 @@ def main():
     window = MainWindow(engine)
     window.show()
     sys.exit(app.exec())
+
+
+def _resource_path(rel_path: Path) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return (base / rel_path).resolve()
 
 
 if __name__ == "__main__":
