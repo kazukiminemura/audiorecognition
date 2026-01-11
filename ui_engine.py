@@ -10,6 +10,7 @@ from pipeline import SpeechToEnglishPipeline
 from pipeline_impl import JaToEnTranslator, EnToJaTranslator
 from lfm2_transcriber import LFM2AudioTranscriber
 from whisper_transcriber import WhisperOVTranscriber
+from vad import SileroVAD
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ class AudioProducer:
         out_short: Optional[Queue],
         target_sr: int,
         enable_short: Callable[[], bool],
+        vad: Optional[SileroVAD],
     ):
         while not stop_event.is_set():
             audio, sr = self._record_fn(
@@ -56,6 +58,8 @@ class AudioProducer:
                 loopback=cfg.use_loopback,
             )
             if audio.size == 0:
+                continue
+            if vad is not None and not vad.has_speech(audio, sr):
                 continue
             if out_short is not None and enable_short():
                 out_short.put((audio, sr))
@@ -146,6 +150,7 @@ class SpeechEngine(QtCore.QObject):
             pipeline_short = self._factory.create(cfg)
             with self._pipeline_lock:
                 self._pipeline = pipeline_short
+            vad = SileroVAD()
         except Exception as exc:
             self.error.emit(str(exc))
             self.status.emit("Idle")
@@ -160,6 +165,7 @@ class SpeechEngine(QtCore.QObject):
                 out_short,
                 pipeline_short.recognizer.target_sr,
                 self._is_short_enabled,
+                vad,
             ),
             daemon=True,
         )

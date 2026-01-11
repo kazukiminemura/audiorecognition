@@ -16,10 +16,8 @@ from pipeline import SpeechToEnglishPipeline
 from pipeline_impl import JaToEnTranslator
 from settings import DEFAULT_MIC_DEVICE, DEFAULT_MODEL_ID, LFM2_AUDIO_REPO
 from lfm2_transcriber import LFM2AudioTranscriber
-from whisper_transcriber import (
-    WhisperOVTranscriber,
-    transcribe_audio,
-)
+from whisper_transcriber import WhisperOVTranscriber, transcribe_audio
+from vad import SileroVAD
 
 # Reduce noisy Hugging Face/Transformers warnings for this CLI.
 hf_logging.set_verbosity_error()
@@ -176,6 +174,8 @@ def _run_mic(args, capture_device):
     stop_event = threading.Event()
     work_q: Queue[tuple[np.ndarray, int]] = Queue()
 
+    vad = SileroVAD()
+
     def producer():
         while not stop_event.is_set():
             audio, sr = record_audio(
@@ -184,6 +184,10 @@ def _run_mic(args, capture_device):
                 device=capture_device,
                 loopback=args.loopback,
             )
+            if audio.size == 0:
+                continue
+            if vad is not None and not vad.has_speech(audio, sr):
+                continue
             # Block instead of dropping to guarantee no chunks are skipped.
             work_q.put((audio, sr))
 

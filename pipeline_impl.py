@@ -25,13 +25,24 @@ class JaToEnTranslator:
             [model_id, "Helsinki-NLP/opus-mt-ja-en"],
             self.device,
         )
+        self.src_lang = "jpn_Jpan"
+        self.tgt_lang = "eng_Latn"
 
     def translate(self, text: str) -> str:
         if not text:
             return ""
+        if hasattr(self.tokenizer, "src_lang"):
+            self.tokenizer.src_lang = self.src_lang
         inputs = self.tokenizer(text, return_tensors="pt", truncation=True)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        output = self.model.generate(**inputs, max_new_tokens=256)
+        forced_bos = None
+        if hasattr(self.tokenizer, "lang_code_to_id"):
+            forced_bos = self.tokenizer.lang_code_to_id.get(self.tgt_lang)
+        output = self.model.generate(
+            **inputs,
+            max_new_tokens=256,
+            forced_bos_token_id=forced_bos,
+        )
         return self.tokenizer.decode(output[0], skip_special_tokens=True)
 
 
@@ -50,13 +61,24 @@ class EnToJaTranslator:
             [model_id, "Helsinki-NLP/opus-mt-en-ja"],
             self.device,
         )
+        self.src_lang = "eng_Latn"
+        self.tgt_lang = "jpn_Jpan"
 
     def translate(self, text: str) -> str:
         if not text:
             return ""
+        if hasattr(self.tokenizer, "src_lang"):
+            self.tokenizer.src_lang = self.src_lang
         inputs = self.tokenizer(text, return_tensors="pt", truncation=True)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        output = self.model.generate(**inputs, max_new_tokens=256)
+        forced_bos = None
+        if hasattr(self.tokenizer, "lang_code_to_id"):
+            forced_bos = self.tokenizer.lang_code_to_id.get(self.tgt_lang)
+        output = self.model.generate(
+            **inputs,
+            max_new_tokens=256,
+            forced_bos_token_id=forced_bos,
+        )
         return self.tokenizer.decode(output[0], skip_special_tokens=True)
 
 

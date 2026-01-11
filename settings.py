@@ -3,8 +3,8 @@ from pathlib import Path
 import pyaudiowpatch as pyaudio
 
 DEFAULT_MODEL_ID = "OpenVINO/whisper-large-v3-fp16-ov"
-TRANSLATION_MODEL_ID = "Helsinki-NLP/opus-mt-jap-en"
-TRANSLATION_MODEL_ID_EN_JA = "Helsinki-NLP/opus-mt-en-jap"
+TRANSLATION_MODEL_ID = "facebook/nllb-200-distilled-600M"
+TRANSLATION_MODEL_ID_EN_JA = "facebook/nllb-200-distilled-600M"
 FIXED_SAMPLE_RATE = 16000
 MIC_INPUT_SAMPLE_RATE = 48000
 DEFAULT_MIC_DEVICE = None
@@ -22,5 +22,10 @@ PROJECT_MODELS_DIR = os.getenv(
 )
 LFM2_AUDIO_HF_HOME = os.getenv("LFM2_AUDIO_HF_HOME", PROJECT_MODELS_DIR)
 LFM2_AUDIO_DISABLE_SYMLINKS = os.getenv("LFM2_AUDIO_DISABLE_SYMLINKS", "1") != "0"
+
+VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.5"))
+VAD_MIN_SPEECH_MS = int(os.getenv("VAD_MIN_SPEECH_MS", "250"))
+VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "100"))
+VAD_WINDOW_SAMPLES = int(os.getenv("VAD_WINDOW_SAMPLES", "512"))
 
 WARNED_DENOISE = set()

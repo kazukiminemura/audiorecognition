@@ -19,3 +19,4 @@ PySide6
 torchcodec
 sacremoses
 liquid-audio
+silero-vad
