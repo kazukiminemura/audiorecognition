@@ -29,6 +29,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(central)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
+        self._content_layout = layout
 
         title = QtWidgets.QLabel("Speech Recognition + Translation")
         title.setObjectName("Title")
@@ -101,13 +102,13 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_row_engine.addWidget(self.lfm2_repo)
         btn_row_engine.addStretch(1)
 
-        jp_label = QtWidgets.QLabel("Short (single chunk) - Japanese")
-        jp_label.setObjectName("Section")
+        self.jp_label = QtWidgets.QLabel("Short (single chunk) - Japanese")
+        self.jp_label.setObjectName("Section")
         self.jp_text = QtWidgets.QTextEdit()
         self.jp_text.setReadOnly(True)
 
-        en_label = QtWidgets.QLabel("Short (single chunk) - English")
-        en_label.setObjectName("Section")
+        self.en_label = QtWidgets.QLabel("Short (single chunk) - English")
+        self.en_label.setObjectName("Section")
         self.en_text = QtWidgets.QTextEdit()
         self.en_text.setReadOnly(True)
 
@@ -115,9 +116,9 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addLayout(btn_row_top)
         layout.addLayout(btn_row_bottom)
         layout.addLayout(btn_row_engine)
-        layout.addWidget(jp_label)
+        layout.addWidget(self.jp_label)
         layout.addWidget(self.jp_text, 1)
-        layout.addWidget(en_label)
+        layout.addWidget(self.en_label)
         layout.addWidget(self.en_text, 1)
 
         self._apply_style()
@@ -126,6 +127,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._speaker_palette = SpeakerPalette()
         self._current_source_lang = "ja"
         self._toggle_engine_fields()
+        self._update_language_labels()
+        self._update_language_order()
 
     def closeEvent(self, event):
         self._engine.stop()
@@ -176,6 +179,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._engine.set_translation_enabled(cfg.enable_translation)
         self._engine.start(cfg)
         self._engine.set_source_lang(source_lang)
+        self._update_language_labels()
+        self._update_language_order()
 
     def _stop(self):
         self._engine.stop()
@@ -184,6 +189,8 @@ class MainWindow(QtWidgets.QMainWindow):
         source_lang = "ja" if idx == 0 else "en"
         self._current_source_lang = source_lang
         self._engine.set_source_lang(source_lang)
+        self._update_language_labels()
+        self._update_language_order()
 
     def _reset_text(self):
         self._short_jp = SpeakerTextAccumulator()
@@ -229,16 +236,32 @@ class MainWindow(QtWidgets.QMainWindow):
         except OSError as exc:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(exc))
 
-    @QtCore.Slot(str, str, object)
-    def _append_short(self, jp: str, en: str, speaker: Optional[str]):
-        if jp:
-            self._short_jp.append(jp, speaker)
-            self.jp_text.setHtml(self._short_jp.render_html(self._speaker_palette))
-            self.jp_text.moveCursor(QtGui.QTextCursor.End)
-        if en:
-            self._short_en.append(en, speaker)
-            self.en_text.setHtml(self._short_en.render_html(self._speaker_palette))
-            self.en_text.moveCursor(QtGui.QTextCursor.End)
+    @QtCore.Slot(str, str, object, str)
+    def _append_short(
+        self,
+        source_text: str,
+        translated_text: str,
+        speaker: Optional[str],
+        source_lang: str,
+    ):
+        if source_lang == "ja":
+            if source_text:
+                self._short_jp.append(source_text, speaker)
+                self.jp_text.setHtml(self._short_jp.render_html(self._speaker_palette))
+                self.jp_text.moveCursor(QtGui.QTextCursor.End)
+            if translated_text:
+                self._short_en.append(translated_text, speaker)
+                self.en_text.setHtml(self._short_en.render_html(self._speaker_palette))
+                self.en_text.moveCursor(QtGui.QTextCursor.End)
+        else:
+            if source_text:
+                self._short_en.append(source_text, speaker)
+                self.en_text.setHtml(self._short_en.render_html(self._speaker_palette))
+                self.en_text.moveCursor(QtGui.QTextCursor.End)
+            if translated_text:
+                self._short_jp.append(translated_text, speaker)
+                self.jp_text.setHtml(self._short_jp.render_html(self._speaker_palette))
+                self.jp_text.moveCursor(QtGui.QTextCursor.End)
 
     @QtCore.Slot(str)
     def _set_status(self, status: str):
@@ -272,6 +295,29 @@ class MainWindow(QtWidgets.QMainWindow):
     def _toggle_engine_fields(self):
         use_lfm2 = self.engine_select.currentIndex() == 1
         self.lfm2_repo.setEnabled(use_lfm2)
+
+    def _update_language_labels(self):
+        if self._current_source_lang == "ja":
+            self.jp_label.setText("Short (single chunk) - Japanese (Source)")
+            self.en_label.setText("Short (single chunk) - English (Translation)")
+        else:
+            self.jp_label.setText("Short (single chunk) - Japanese (Translation)")
+            self.en_label.setText("Short (single chunk) - English (Source)")
+
+    def _update_language_order(self):
+        layout = self._content_layout
+        for widget in (self.jp_label, self.jp_text, self.en_label, self.en_text):
+            layout.removeWidget(widget)
+        if self._current_source_lang == "ja":
+            layout.addWidget(self.jp_label)
+            layout.addWidget(self.jp_text, 1)
+            layout.addWidget(self.en_label)
+            layout.addWidget(self.en_text, 1)
+        else:
+            layout.addWidget(self.en_label)
+            layout.addWidget(self.en_text, 1)
+            layout.addWidget(self.jp_label)
+            layout.addWidget(self.jp_text, 1)
 
 
 def _resource_path(rel_path: Path) -> Path:

@@ -66,14 +66,19 @@ class AudioProducer:
 
 
 class ShortProcessor:
-    def __init__(self, get_pipeline: Callable[[], Optional[SpeechToEnglishPipeline]]):
+    def __init__(
+        self,
+        get_pipeline: Callable[[], Optional[SpeechToEnglishPipeline]],
+        get_source_lang: Callable[[], str],
+    ):
         self._get_pipeline = get_pipeline
+        self._get_source_lang = get_source_lang
 
     def run(
         self,
         stop_event: threading.Event,
         in_q: Queue,
-        emit: Callable[[str, str, Optional[str]], None],
+        emit: Callable[[str, str, Optional[str], str], None],
         enable_translation: Callable[[], bool],
     ):
         while not stop_event.is_set() or not in_q.empty():
@@ -88,14 +93,19 @@ class ShortProcessor:
             if pipeline is None:
                 in_q.task_done()
                 continue
-            jp = pipeline.recognizer.transcribe_array(audio, sr)
-            en = pipeline.translator.translate(jp) if jp and enable_translation() else ""
-            emit(jp, en, None)
+            source_lang = self._get_source_lang()
+            source_text = pipeline.recognizer.transcribe_array(audio, sr)
+            translated = (
+                pipeline.translator.translate(source_text)
+                if source_text and enable_translation()
+                else ""
+            )
+            emit(source_text, translated, None, source_lang)
             in_q.task_done()
 
 
 class SpeechEngine(QtCore.QObject):
-    text_ready_short = QtCore.Signal(str, str, object)
+    text_ready_short = QtCore.Signal(str, str, object, str)
     status = QtCore.Signal(str)
     error = QtCore.Signal(str)
 
@@ -170,7 +180,7 @@ class SpeechEngine(QtCore.QObject):
             daemon=True,
         )
         short_t = threading.Thread(
-            target=ShortProcessor(self._get_pipeline).run,
+            target=ShortProcessor(self._get_pipeline, self._get_source_lang).run,
             args=(
                 self._stop,
                 self._work_q_short,
@@ -187,6 +197,10 @@ class SpeechEngine(QtCore.QObject):
     def _get_pipeline(self) -> Optional[SpeechToEnglishPipeline]:
         with self._pipeline_lock:
             return self._pipeline
+
+    def _get_source_lang(self) -> str:
+        cfg = self._cfg
+        return cfg.source_lang if cfg is not None else "ja"
 
     def set_source_lang(self, source_lang: str):
         cfg = self._cfg

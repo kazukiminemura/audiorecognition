@@ -31,13 +31,10 @@ class JaToEnTranslator:
     def translate(self, text: str) -> str:
         if not text:
             return ""
-        if hasattr(self.tokenizer, "src_lang"):
-            self.tokenizer.src_lang = self.src_lang
+        _set_nllb_langs(self.tokenizer, self.src_lang, self.tgt_lang)
         inputs = self.tokenizer(text, return_tensors="pt", truncation=True)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        forced_bos = None
-        if hasattr(self.tokenizer, "lang_code_to_id"):
-            forced_bos = self.tokenizer.lang_code_to_id.get(self.tgt_lang)
+        forced_bos = _get_forced_bos_id(self.tokenizer, self.tgt_lang)
         output = self.model.generate(
             **inputs,
             max_new_tokens=256,
@@ -67,13 +64,10 @@ class EnToJaTranslator:
     def translate(self, text: str) -> str:
         if not text:
             return ""
-        if hasattr(self.tokenizer, "src_lang"):
-            self.tokenizer.src_lang = self.src_lang
+        _set_nllb_langs(self.tokenizer, self.src_lang, self.tgt_lang)
         inputs = self.tokenizer(text, return_tensors="pt", truncation=True)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        forced_bos = None
-        if hasattr(self.tokenizer, "lang_code_to_id"):
-            forced_bos = self.tokenizer.lang_code_to_id.get(self.tgt_lang)
+        forced_bos = _get_forced_bos_id(self.tokenizer, self.tgt_lang)
         output = self.model.generate(
             **inputs,
             max_new_tokens=256,
@@ -106,3 +100,22 @@ def _load_translation_model(model_ids: list[str], device: torch.device):
         "Failed to load translation model. Tried: "
         + ", ".join([m for m in model_ids if m])
     ) from last_exc
+
+
+def _set_nllb_langs(tokenizer, src_lang: str, tgt_lang: str) -> None:
+    if hasattr(tokenizer, "src_lang"):
+        tokenizer.src_lang = src_lang
+    if hasattr(tokenizer, "tgt_lang"):
+        tokenizer.tgt_lang = tgt_lang
+
+
+def _get_forced_bos_id(tokenizer, tgt_lang: str):
+    if hasattr(tokenizer, "lang_code_to_id"):
+        value = tokenizer.lang_code_to_id.get(tgt_lang)
+        if value is not None:
+            return value
+    if hasattr(tokenizer, "convert_tokens_to_ids"):
+        value = tokenizer.convert_tokens_to_ids(tgt_lang)
+        if isinstance(value, int) and value >= 0:
+            return value
+    return None
