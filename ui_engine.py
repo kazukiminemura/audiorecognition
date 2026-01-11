@@ -6,9 +6,9 @@ from typing import Callable, Optional
 import numpy as np
 from PySide6 import QtCore
 
-from diarization import PyannoteDiarizer
 from pipeline import SpeechToEnglishPipeline
 from pipeline_impl import JaToEnTranslator, EnToJaTranslator
+from lfm2_transcriber import LFM2AudioTranscriber
 from whisper_transcriber import WhisperOVTranscriber
 
 
@@ -17,20 +17,23 @@ class RunConfig:
     use_loopback: bool
     source_lang: str
     chunk_seconds: float
+    engine: str
+    lfm2_repo: str
     enable_short: bool
     enable_translation: bool
-    enable_diarization: bool
-    diarization_speakers: int
 
 
 class PipelineFactory:
-    def create(self, source_lang: str) -> SpeechToEnglishPipeline:
-        transcriber = WhisperOVTranscriber(
-            language=source_lang,
-            task="transcribe",
-            device="GPU",
-        )
-        translator = JaToEnTranslator() if source_lang == "ja" else EnToJaTranslator()
+    def create(self, cfg: RunConfig) -> SpeechToEnglishPipeline:
+        if cfg.engine == "lfm2":
+            transcriber = LFM2AudioTranscriber(repo_id=cfg.lfm2_repo or None)
+        else:
+            transcriber = WhisperOVTranscriber(
+                language=cfg.source_lang,
+                task="transcribe",
+                device="GPU",
+            )
+        translator = JaToEnTranslator() if cfg.source_lang == "ja" else EnToJaTranslator()
         return SpeechToEnglishPipeline(transcriber, translator)
 
 
@@ -59,9 +62,8 @@ class AudioProducer:
 
 
 class ShortProcessor:
-    def __init__(self, pipeline: SpeechToEnglishPipeline, diarizer: Optional[PyannoteDiarizer]):
-        self._pipeline = pipeline
-        self._diarizer = diarizer
+    def __init__(self, get_pipeline: Callable[[], Optional[SpeechToEnglishPipeline]]):
+        self._get_pipeline = get_pipeline
 
     def run(
         self,
@@ -69,8 +71,6 @@ class ShortProcessor:
         in_q: Queue,
         emit: Callable[[str, str, Optional[str]], None],
         enable_translation: Callable[[], bool],
-        enable_diarization: Callable[[], bool],
-        get_diarization_speakers: Callable[[], int],
     ):
         while not stop_event.is_set() or not in_q.empty():
             try:
@@ -80,19 +80,13 @@ class ShortProcessor:
             if audio.size == 0:
                 in_q.task_done()
                 continue
-            jp = self._pipeline.recognizer.transcribe_array(audio, sr)
-            en = self._pipeline.translator.translate(jp) if jp and enable_translation() else ""
-            num_speakers = get_diarization_speakers()
-            speaker = (
-                self._diarizer.dominant_speaker(
-                    audio,
-                    sr,
-                    num_speakers=num_speakers if num_speakers > 0 else None,
-                )
-                if self._diarizer is not None and enable_diarization()
-                else None
-            )
-            emit(jp, en, speaker)
+            pipeline = self._get_pipeline()
+            if pipeline is None:
+                in_q.task_done()
+                continue
+            jp = pipeline.recognizer.transcribe_array(audio, sr)
+            en = pipeline.translator.translate(jp) if jp and enable_translation() else ""
+            emit(jp, en, None)
             in_q.task_done()
 
 
@@ -110,8 +104,9 @@ class SpeechEngine(QtCore.QObject):
         self._work_q_short: Queue = Queue()
         self._translate_enabled = True
         self._short_enabled = True
-        self._diarization_enabled = True
-        self._diarization_speakers = 0
+        self._pipeline_lock = threading.Lock()
+        self._pipeline: Optional[SpeechToEnglishPipeline] = None
+        self._cfg: Optional[RunConfig] = None
 
     def set_translation_enabled(self, enabled: bool):
         self._translate_enabled = enabled
@@ -125,21 +120,10 @@ class SpeechEngine(QtCore.QObject):
     def _is_short_enabled(self) -> bool:
         return self._short_enabled
 
-    def set_diarization_enabled(self, enabled: bool):
-        self._diarization_enabled = enabled
-
-    def _is_diarization_enabled(self) -> bool:
-        return self._diarization_enabled
-
-    def set_diarization_speakers(self, count: int):
-        self._diarization_speakers = max(0, int(count))
-
-    def _get_diarization_speakers(self) -> int:
-        return self._diarization_speakers
-
     def start(self, cfg: RunConfig):
         if self._threads:
             return
+        self._cfg = cfg
         self._stop.clear()
         self.status.emit("Starting...")
         threading.Thread(target=self._init_and_run, args=(cfg,), daemon=True).start()
@@ -152,12 +136,16 @@ class SpeechEngine(QtCore.QObject):
         for t in self._threads:
             t.join(timeout=1.0)
         self._threads = []
+        with self._pipeline_lock:
+            self._pipeline = None
+        self._cfg = None
         self.status.emit("Idle")
 
     def _init_and_run(self, cfg: RunConfig):
         try:
-            pipeline_short = self._factory.create(cfg.source_lang)
-            diarizer = PyannoteDiarizer() if cfg.enable_diarization else None
+            pipeline_short = self._factory.create(cfg)
+            with self._pipeline_lock:
+                self._pipeline = pipeline_short
         except Exception as exc:
             self.error.emit(str(exc))
             self.status.emit("Idle")
@@ -176,14 +164,12 @@ class SpeechEngine(QtCore.QObject):
             daemon=True,
         )
         short_t = threading.Thread(
-            target=ShortProcessor(pipeline_short, diarizer).run,
+            target=ShortProcessor(self._get_pipeline).run,
             args=(
                 self._stop,
                 self._work_q_short,
                 self.text_ready_short.emit,
                 self._is_translation_enabled,
-                self._is_diarization_enabled,
-                self._get_diarization_speakers,
             ),
             daemon=True,
         )
@@ -191,3 +177,31 @@ class SpeechEngine(QtCore.QObject):
         for t in self._threads:
             t.start()
         self.status.emit("Listening")
+
+    def _get_pipeline(self) -> Optional[SpeechToEnglishPipeline]:
+        with self._pipeline_lock:
+            return self._pipeline
+
+    def set_source_lang(self, source_lang: str):
+        cfg = self._cfg
+        if cfg is None:
+            return
+        if cfg.source_lang == source_lang:
+            return
+        new_cfg = RunConfig(
+            use_loopback=cfg.use_loopback,
+            source_lang=source_lang,
+            chunk_seconds=cfg.chunk_seconds,
+            engine=cfg.engine,
+            lfm2_repo=cfg.lfm2_repo,
+            enable_short=cfg.enable_short,
+            enable_translation=cfg.enable_translation,
+        )
+        try:
+            new_pipeline = self._factory.create(new_cfg)
+        except Exception as exc:
+            self.error.emit(str(exc))
+            return
+        with self._pipeline_lock:
+            self._pipeline = new_pipeline
+        self._cfg = new_cfg

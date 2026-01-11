@@ -1,4 +1,4 @@
-# Audio Recognition CLI (OpenVINO whisper-large-v3-int4-ov)
+# Audio Recognition CLI (Whisper/OpenVINO + LFM2.5-Audio)
 
 ## Setup
 
@@ -18,6 +18,12 @@ Common options:
 
 ```bash
 python transcribe.py audio.mp3 --language ja --task transcribe --device CPU
+```
+
+Use LFM2.5-Audio (liquid-audio, auto-download from Hugging Face):
+
+```bash
+python transcribe.py audio.mp3 --engine lfm2
 ```
 
 Record from microphone:

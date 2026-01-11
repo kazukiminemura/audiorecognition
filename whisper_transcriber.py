@@ -6,10 +6,11 @@ from transformers import AutoProcessor
 
 from audio_io import load_audio, record_audio
 from audio_processing import build_forced_decoder_ids, chunk_audio, denoise_audio
-from settings import DEFAULT_MODEL_ID, FIXED_SAMPLE_RATE
+from settings import DEFAULT_MODEL_ID, FIXED_SAMPLE_RATE, PROJECT_MODELS_DIR
 
 
 def prepare_model(model_id, device):
+    os.environ.setdefault("HF_HOME", PROJECT_MODELS_DIR)
     processor = AutoProcessor.from_pretrained(model_id)
     model = OVModelForSpeechSeq2Seq.from_pretrained(
         model_id,

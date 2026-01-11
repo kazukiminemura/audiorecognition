@@ -24,7 +24,9 @@ warnings.filterwarnings(
     message=r".*torch\.distributed\._shard\.checkpoint.*",
     category=DeprecationWarning,
 )
-datas = []
+datas = [
+    (str(root / "deployment" / "favicon.ico"), "deployment"),
+]
 binaries = []
 hiddenimports = []
 

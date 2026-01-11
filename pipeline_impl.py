@@ -1,8 +1,13 @@
+import os
 import torch
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 from pipeline import SpeechToEnglishPipeline
-from settings import TRANSLATION_MODEL_ID, TRANSLATION_MODEL_ID_EN_JA
+from settings import (
+    PROJECT_MODELS_DIR,
+    TRANSLATION_MODEL_ID,
+    TRANSLATION_MODEL_ID_EN_JA,
+)
 
 
 class JaToEnTranslator:
@@ -16,11 +21,10 @@ class JaToEnTranslator:
             ) from exc
         xpu_available = hasattr(torch, "xpu") and torch.xpu.is_available()
         self.device = torch.device("xpu" if xpu_available else "cpu")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(
-            model_id,
-            attn_implementation="eager",
-        ).to(self.device)
+        self.tokenizer, self.model = _load_translation_model(
+            [model_id, "Helsinki-NLP/opus-mt-ja-en"],
+            self.device,
+        )
 
     def translate(self, text: str) -> str:
         if not text:
@@ -42,11 +46,10 @@ class EnToJaTranslator:
             ) from exc
         xpu_available = hasattr(torch, "xpu") and torch.xpu.is_available()
         self.device = torch.device("xpu" if xpu_available else "cpu")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(
-            model_id,
-            attn_implementation="eager",
-        ).to(self.device)
+        self.tokenizer, self.model = _load_translation_model(
+            [model_id, "Helsinki-NLP/opus-mt-en-ja"],
+            self.device,
+        )
 
     def translate(self, text: str) -> str:
         if not text:
@@ -59,3 +62,25 @@ class EnToJaTranslator:
 
 def build_speech_to_english_pipeline(recognizer) -> SpeechToEnglishPipeline:
     return SpeechToEnglishPipeline(recognizer=recognizer, translator=JaToEnTranslator())
+
+
+def _load_translation_model(model_ids: list[str], device: torch.device):
+    last_exc: Exception | None = None
+    os.environ.setdefault("HF_HOME", PROJECT_MODELS_DIR)
+    for candidate in model_ids:
+        if not candidate:
+            continue
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(candidate)
+            model = AutoModelForSeq2SeqLM.from_pretrained(
+                candidate,
+                attn_implementation="eager",
+            ).to(device)
+            return tokenizer, model
+        except Exception as exc:
+            last_exc = exc
+            continue
+    raise RuntimeError(
+        "Failed to load translation model. Tried: "
+        + ", ".join([m for m in model_ids if m])
+    ) from last_exc

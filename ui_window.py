@@ -5,6 +5,7 @@ from typing import Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from settings import LFM2_AUDIO_REPO
 from ui_engine import RunConfig, SpeechEngine
 from ui_models import SpeakerTextAccumulator, SpeakerPalette
 
@@ -42,6 +43,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.system_audio = QtWidgets.QCheckBox("System Audio")
         self.lang_select = QtWidgets.QComboBox()
         self.lang_select.addItems(["Japanese -> English", "English -> Japanese"])
+        self.engine_select = QtWidgets.QComboBox()
+        self.engine_select.addItems(["Whisper (OpenVINO)", "LiquidAI LFM2.5-Audio (CPU)"])
+        self.lfm2_repo = QtWidgets.QLineEdit(LFM2_AUDIO_REPO)
+        self.lfm2_repo.setPlaceholderText("Hugging Face repo id")
         self.chunk_spin = QtWidgets.QDoubleSpinBox()
         self.chunk_spin.setRange(0.5, 10.0)
         self.chunk_spin.setSingleStep(0.5)
@@ -51,12 +56,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.short_toggle.setChecked(True)
         self.translate_toggle = QtWidgets.QCheckBox("Translate")
         self.translate_toggle.setChecked(True)
-        self.diarization_toggle = QtWidgets.QCheckBox("Diarization")
-        self.diarization_toggle.setChecked(True)
-        self.diarization_speakers = QtWidgets.QSpinBox()
-        self.diarization_speakers.setRange(0, 10)
-        self.diarization_speakers.setValue(0)
-        self.diarization_speakers.setToolTip("0 = Auto, otherwise fixed number of speakers")
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setFixedHeight(10)
@@ -68,10 +67,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_btn.clicked.connect(self._stop)
         self.save_btn.clicked.connect(self._save_script)
         self.reset_btn.clicked.connect(self._reset_text)
+        self.lang_select.currentIndexChanged.connect(self._set_source_lang)
+        self.engine_select.currentIndexChanged.connect(self._toggle_engine_fields)
         self.short_toggle.toggled.connect(self._engine.set_short_enabled)
         self.translate_toggle.toggled.connect(self._engine.set_translation_enabled)
-        self.diarization_toggle.toggled.connect(self._engine.set_diarization_enabled)
-        self.diarization_speakers.valueChanged.connect(self._engine.set_diarization_speakers)
 
         btn_row_top.addWidget(self.start_btn)
         btn_row_top.addWidget(self.stop_btn)
@@ -92,10 +91,15 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_row_bottom.addSpacing(8)
         btn_row_bottom.addWidget(self.short_toggle)
         btn_row_bottom.addWidget(self.translate_toggle)
-        btn_row_bottom.addWidget(self.diarization_toggle)
-        btn_row_bottom.addWidget(QtWidgets.QLabel("Speakers"))
-        btn_row_bottom.addWidget(self.diarization_speakers)
         btn_row_bottom.addStretch(1)
+
+        btn_row_engine = QtWidgets.QHBoxLayout()
+        btn_row_engine.addWidget(QtWidgets.QLabel("Engine"))
+        btn_row_engine.addWidget(self.engine_select)
+        btn_row_engine.addSpacing(8)
+        btn_row_engine.addWidget(QtWidgets.QLabel("LFM2 Repo"))
+        btn_row_engine.addWidget(self.lfm2_repo)
+        btn_row_engine.addStretch(1)
 
         jp_label = QtWidgets.QLabel("Short (single chunk) - Japanese")
         jp_label.setObjectName("Section")
@@ -110,6 +114,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(title)
         layout.addLayout(btn_row_top)
         layout.addLayout(btn_row_bottom)
+        layout.addLayout(btn_row_engine)
         layout.addWidget(jp_label)
         layout.addWidget(self.jp_text, 1)
         layout.addWidget(en_label)
@@ -120,6 +125,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._short_en = SpeakerTextAccumulator()
         self._speaker_palette = SpeakerPalette()
         self._current_source_lang = "ja"
+        self._toggle_engine_fields()
 
     def closeEvent(self, event):
         self._engine.stop()
@@ -155,24 +161,29 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "No mode", "Enable Short.")
             return
         source_lang = "ja" if self.lang_select.currentIndex() == 0 else "en"
+        engine = "whisper" if self.engine_select.currentIndex() == 0 else "lfm2"
         self._current_source_lang = source_lang
         cfg = RunConfig(
             use_loopback=self.system_audio.isChecked(),
             source_lang=source_lang,
             chunk_seconds=self.chunk_spin.value(),
+            engine=engine,
+            lfm2_repo=self.lfm2_repo.text().strip(),
             enable_short=self.short_toggle.isChecked(),
             enable_translation=self.translate_toggle.isChecked(),
-            enable_diarization=self.diarization_toggle.isChecked(),
-            diarization_speakers=self.diarization_speakers.value(),
         )
         self._engine.set_short_enabled(cfg.enable_short)
         self._engine.set_translation_enabled(cfg.enable_translation)
-        self._engine.set_diarization_enabled(cfg.enable_diarization)
-        self._engine.set_diarization_speakers(cfg.diarization_speakers)
         self._engine.start(cfg)
+        self._engine.set_source_lang(source_lang)
 
     def _stop(self):
         self._engine.stop()
+
+    def _set_source_lang(self, idx: int):
+        source_lang = "ja" if idx == 0 else "en"
+        self._current_source_lang = source_lang
+        self._engine.set_source_lang(source_lang)
 
     def _reset_text(self):
         self._short_jp = SpeakerTextAccumulator()
@@ -236,6 +247,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.start_btn.setEnabled(False)
             self.stop_btn.setEnabled(True)
             self.progress.setVisible(False)
+            self.engine_select.setEnabled(False)
+            self.lfm2_repo.setEnabled(False)
         elif status in ("Idle", "Stopping..."):
             self.start_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
@@ -243,14 +256,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.system_audio.setEnabled(True)
             self.lang_select.setEnabled(True)
             self.chunk_spin.setEnabled(True)
+            self.engine_select.setEnabled(True)
+            self._toggle_engine_fields()
         elif status == "Starting...":
             self.start_btn.setEnabled(False)
             self.stop_btn.setEnabled(True)
             self.progress.setVisible(True)
+            self.engine_select.setEnabled(False)
+            self.lfm2_repo.setEnabled(False)
 
     @QtCore.Slot(str)
     def _show_error(self, message: str):
         QtWidgets.QMessageBox.critical(self, "Error", message)
+
+    def _toggle_engine_fields(self):
+        use_lfm2 = self.engine_select.currentIndex() == 1
+        self.lfm2_repo.setEnabled(use_lfm2)
 
 
 def _resource_path(rel_path: Path) -> Path:

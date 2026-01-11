@@ -16,3 +16,6 @@ optimum-intel
 openvino
 sentencepiece
 PySide6
+torchcodec
+sacremoses
+liquid-audio
