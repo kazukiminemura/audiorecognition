@@ -1,6 +1,9 @@
+import hf_env  # ensure HF env defaults before other imports
 import os
 from pathlib import Path
 import pyaudiowpatch as pyaudio
+
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 
 DEFAULT_MODEL_ID = "OpenVINO/whisper-large-v3-fp16-ov"
 TRANSLATION_MODEL_ID = "facebook/nllb-200-distilled-600M"

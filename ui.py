@@ -1,3 +1,5 @@
+import hf_env  # ensure HF env defaults before other imports
+import os
 import sys
 
 from PySide6 import QtCore, QtWidgets
@@ -30,34 +32,40 @@ def main():
     engine = SpeechEngine(PipelineFactory(), AudioProducer(record_audio))
     window = MainWindow(engine)
 
-    dialog = QtWidgets.QProgressDialog("Preparing models...", "Cancel", 0, 0, window)
-    dialog.setWindowTitle("Downloading models")
-    dialog.setWindowModality(QtCore.Qt.WindowModal)
-    dialog.setMinimumDuration(0)
+    window.show()
 
-    thread = QtCore.QThread()
-    worker = PreloadWorker()
-    worker.moveToThread(thread)
-    thread.started.connect(worker.run)
-    worker.progress.connect(dialog.setLabelText)
-    worker.finished.connect(thread.quit)
-    worker.finished.connect(worker.deleteLater)
-    worker.error.connect(thread.quit)
-    worker.error.connect(worker.deleteLater)
+    if os.getenv("PRELOAD_ON_START", "1") not in ("0", "false", "False", "no", "NO"):
+        dialog = QtWidgets.QProgressDialog(
+            "Preparing models...", "Cancel", 0, 0, window
+        )
+        dialog.setWindowTitle("Downloading models")
+        dialog.setWindowModality(QtCore.Qt.WindowModal)
+        dialog.setMinimumDuration(0)
 
-    def _finish(ok: bool):
-        dialog.close()
-        window.show()
+        thread = QtCore.QThread()
+        worker = PreloadWorker()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(dialog.setLabelText)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.error.connect(thread.quit)
+        worker.error.connect(worker.deleteLater)
 
-    worker.finished.connect(_finish)
-    worker.error.connect(lambda msg: QtWidgets.QMessageBox.critical(window, "Error", msg))
-    thread.finished.connect(thread.deleteLater)
+        def _finish(ok: bool):
+            dialog.close()
 
-    dialog.canceled.connect(thread.requestInterruption)
-    dialog.canceled.connect(thread.quit)
+        worker.finished.connect(_finish)
+        worker.error.connect(
+            lambda msg: QtWidgets.QMessageBox.critical(window, "Error", msg)
+        )
+        thread.finished.connect(thread.deleteLater)
 
-    thread.start()
-    dialog.show()
+        dialog.canceled.connect(thread.requestInterruption)
+        dialog.canceled.connect(thread.quit)
+
+        thread.start()
+        dialog.show()
     sys.exit(app.exec())
 
 

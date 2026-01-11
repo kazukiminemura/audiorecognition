@@ -1,3 +1,4 @@
+import hf_env  # ensure HF env defaults before other imports
 import os
 
 import torch
@@ -11,6 +12,8 @@ _SUMMARIZER = None
 class MinutesSummarizer:
     def __init__(self, model_id: str = MINUTES_MODEL_ID):
         os.environ.setdefault("HF_HOME", PROJECT_MODELS_DIR)
+        # Ensure defaults are set even if env changes after import.
+        hf_env._init_hf_env()
         self._model_id = model_id
         self._tokenizer = AutoTokenizer.from_pretrained(model_id)
         self._model = AutoModelForCausalLM.from_pretrained(model_id)
