@@ -43,6 +43,7 @@ class WhisperOVTranscriber:
         self.max_new_tokens = max_new_tokens
         self.denoise = denoise
         self.num_beams = num_beams
+        self.last_language: str | None = None
         self.processor, self.model, self.target_sr = prepare_model(model_id, device)
 
     def transcribe_array(self, audio, sr):
@@ -58,6 +59,7 @@ class WhisperOVTranscriber:
             self.max_new_tokens,
             self.denoise,
             self.num_beams,
+            self,
         )
 
     def transcribe_file(self, audio_path):
@@ -89,12 +91,20 @@ def transcribe_array(
     max_new_tokens,
     denoise,
     num_beams,
+    transcriber=None,
 ):
     target_sr = FIXED_SAMPLE_RATE
     if sr != target_sr:
         audio = librosa.resample(audio, orig_sr=sr, target_sr=target_sr)
         sr = target_sr
     forced_decoder_ids = build_forced_decoder_ids(processor, language, task)
+    lang_id_set = None
+    id_to_lang = None
+    if transcriber is not None and hasattr(processor, "tokenizer"):
+        tokenizer = processor.tokenizer
+        if hasattr(tokenizer, "lang_code_to_id") and hasattr(tokenizer, "id_to_lang"):
+            lang_id_set = set(tokenizer.lang_code_to_id.values())
+            id_to_lang = tokenizer.id_to_lang
 
     segments = []
     for chunk in chunk_audio(audio, sr, chunk_length_s, stride_length_s):
@@ -108,6 +118,17 @@ def transcribe_array(
             max_new_tokens=max_new_tokens,
             num_beams=num_beams,
         )
+        if transcriber is not None:
+            if language:
+                transcriber.last_language = language
+            elif lang_id_set is not None and id_to_lang is not None:
+                detected = None
+                for tok_id in generated_ids[0].tolist():
+                    if tok_id in lang_id_set:
+                        detected = id_to_lang.get(tok_id)
+                        break
+                if detected:
+                    transcriber.last_language = detected
         text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
         segments.append(text.strip())
 

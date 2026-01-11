@@ -6,7 +6,7 @@ from typing import Callable, Optional
 import numpy as np
 from PySide6 import QtCore
 
-from pipeline import SpeechToEnglishPipeline
+from pipeline import SpeechToEnglishPipeline, Translator
 from pipeline_impl import JaToEnTranslator, EnToJaTranslator
 from lfm2_transcriber import LFM2AudioTranscriber
 from whisper_transcriber import WhisperOVTranscriber
@@ -36,6 +36,9 @@ class PipelineFactory:
             )
         translator = JaToEnTranslator() if cfg.source_lang == "ja" else EnToJaTranslator()
         return SpeechToEnglishPipeline(transcriber, translator)
+
+    def create_translator(self, source_lang: str) -> Translator:
+        return JaToEnTranslator() if source_lang == "ja" else EnToJaTranslator()
 
 
 class AudioProducer:
@@ -70,9 +73,11 @@ class ShortProcessor:
         self,
         get_pipeline: Callable[[], Optional[SpeechToEnglishPipeline]],
         get_source_lang: Callable[[], str],
+        get_translator: Callable[[str], Translator],
     ):
         self._get_pipeline = get_pipeline
         self._get_source_lang = get_source_lang
+        self._get_translator = get_translator
 
     def run(
         self,
@@ -95,8 +100,11 @@ class ShortProcessor:
                 continue
             source_lang = self._get_source_lang()
             source_text = pipeline.recognizer.transcribe_array(audio, sr)
+            translator = self._get_translator(
+                source_lang
+            )
             translated = (
-                pipeline.translator.translate(source_text)
+                translator.translate(source_text)
                 if source_text and enable_translation()
                 else ""
             )
@@ -121,6 +129,9 @@ class SpeechEngine(QtCore.QObject):
         self._pipeline_lock = threading.Lock()
         self._pipeline: Optional[SpeechToEnglishPipeline] = None
         self._cfg: Optional[RunConfig] = None
+        self._translator_lock = threading.Lock()
+        self._translator_cache: dict[str, Translator] = {}
+        self._source_lang_override: Optional[str] = None
 
     def set_translation_enabled(self, enabled: bool):
         self._translate_enabled = enabled
@@ -153,6 +164,7 @@ class SpeechEngine(QtCore.QObject):
         with self._pipeline_lock:
             self._pipeline = None
         self._cfg = None
+        self._source_lang_override = None
         self.status.emit("Idle")
 
     def _init_and_run(self, cfg: RunConfig):
@@ -180,7 +192,9 @@ class SpeechEngine(QtCore.QObject):
             daemon=True,
         )
         short_t = threading.Thread(
-            target=ShortProcessor(self._get_pipeline, self._get_source_lang).run,
+            target=ShortProcessor(
+                self._get_pipeline, self._get_source_lang, self._get_translator
+            ).run,
             args=(
                 self._stop,
                 self._work_q_short,
@@ -200,28 +214,27 @@ class SpeechEngine(QtCore.QObject):
 
     def _get_source_lang(self) -> str:
         cfg = self._cfg
+        if self._source_lang_override is not None:
+            return self._source_lang_override
         return cfg.source_lang if cfg is not None else "ja"
+
+    def _get_translator(self, source_lang: str) -> Translator:
+        key = "ja" if source_lang == "ja" else "en"
+        with self._translator_lock:
+            if key in self._translator_cache:
+                return self._translator_cache[key]
+            translator = self._factory.create_translator(key)
+            self._translator_cache[key] = translator
+            return translator
 
     def set_source_lang(self, source_lang: str):
         cfg = self._cfg
         if cfg is None:
             return
-        if cfg.source_lang == source_lang:
+        if cfg.source_lang == source_lang and self._source_lang_override is None:
             return
-        new_cfg = RunConfig(
-            use_loopback=cfg.use_loopback,
-            source_lang=source_lang,
-            chunk_seconds=cfg.chunk_seconds,
-            engine=cfg.engine,
-            lfm2_repo=cfg.lfm2_repo,
-            enable_short=cfg.enable_short,
-            enable_translation=cfg.enable_translation,
-        )
-        try:
-            new_pipeline = self._factory.create(new_cfg)
-        except Exception as exc:
-            self.error.emit(str(exc))
-            return
+        self._source_lang_override = source_lang
         with self._pipeline_lock:
-            self._pipeline = new_pipeline
-        self._cfg = new_cfg
+            pipeline = self._pipeline
+            if pipeline is not None and hasattr(pipeline.recognizer, "language"):
+                setattr(pipeline.recognizer, "language", source_lang)

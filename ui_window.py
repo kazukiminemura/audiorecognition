@@ -126,6 +126,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._short_en = SpeakerTextAccumulator()
         self._speaker_palette = SpeakerPalette()
         self._current_source_lang = "ja"
+        self._last_detected_lang = "ja"
         self._toggle_engine_fields()
         self._update_language_labels()
         self._update_language_order()
@@ -200,7 +201,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.en_text.clear()
 
     def _save_script(self):
-        if self._current_source_lang == "ja":
+        source_lang = (
+            self._last_detected_lang
+            if self._current_source_lang == "auto"
+            else self._current_source_lang
+        )
+        if source_lang == "ja":
             short_source = self._short_jp.render_plain()
             short_trans = self._short_en.render_plain()
             src_label = "ja"
@@ -297,18 +303,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lfm2_repo.setEnabled(use_lfm2)
 
     def _update_language_labels(self):
-        if self._current_source_lang == "ja":
+        self._update_language_labels_for(self._current_source_lang)
+
+    def _update_language_order(self):
+        self._update_language_order_for(self._current_source_lang)
+
+    def _update_language_labels_for(self, source_lang: str):
+        if source_lang == "ja":
             self.jp_label.setText("Short (single chunk) - Japanese (Source)")
             self.en_label.setText("Short (single chunk) - English (Translation)")
         else:
             self.jp_label.setText("Short (single chunk) - Japanese (Translation)")
             self.en_label.setText("Short (single chunk) - English (Source)")
 
-    def _update_language_order(self):
+    def _update_language_order_for(self, source_lang: str):
         layout = self._content_layout
         for widget in (self.jp_label, self.jp_text, self.en_label, self.en_text):
             layout.removeWidget(widget)
-        if self._current_source_lang == "ja":
+        if source_lang == "ja":
             layout.addWidget(self.jp_label)
             layout.addWidget(self.jp_text, 1)
             layout.addWidget(self.en_label)

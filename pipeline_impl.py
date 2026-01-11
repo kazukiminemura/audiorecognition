@@ -9,6 +9,8 @@ from settings import (
     TRANSLATION_MODEL_ID_EN_JA,
 )
 
+_TRANSLATION_CACHE: dict[str, tuple[AutoTokenizer, AutoModelForSeq2SeqLM]] = {}
+
 
 class JaToEnTranslator:
     def __init__(self, model_id: str = TRANSLATION_MODEL_ID):
@@ -87,11 +89,16 @@ def _load_translation_model(model_ids: list[str], device: torch.device):
         if not candidate:
             continue
         try:
-            tokenizer = AutoTokenizer.from_pretrained(candidate)
-            model = AutoModelForSeq2SeqLM.from_pretrained(
-                candidate,
-                attn_implementation="eager",
-            ).to(device)
+            cached = _TRANSLATION_CACHE.get(candidate)
+            if cached is not None:
+                tokenizer, model = cached
+            else:
+                tokenizer = AutoTokenizer.from_pretrained(candidate)
+                model = AutoModelForSeq2SeqLM.from_pretrained(
+                    candidate,
+                    attn_implementation="eager",
+                ).to(device)
+                _TRANSLATION_CACHE[candidate] = (tokenizer, model)
             return tokenizer, model
         except Exception as exc:
             last_exc = exc
