@@ -5,6 +5,16 @@ import pyaudiowpatch as pyaudio
 
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        value = value[1:-1].strip()
+    return int(value)
+
 DEFAULT_MODEL_ID = "OpenVINO/whisper-large-v3-fp16-ov"
 TRANSLATION_MODEL_ID = "facebook/nllb-200-distilled-600M"
 TRANSLATION_MODEL_ID_EN_JA = "facebook/nllb-200-distilled-600M"
@@ -32,9 +42,9 @@ VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "100"))
 VAD_WINDOW_SAMPLES = int(os.getenv("VAD_WINDOW_SAMPLES", "512"))
 
 MINUTES_MODEL_ID = os.getenv(
-    "MINUTES_MODEL_ID", "LiquidAI/LFM2.5-1.2B-Instruct-ONNX"
+    "MINUTES_MODEL_ID", "OpenVINO/gemma-3-4b-it-int4-ov"
 )
-MINUTES_MAX_NEW_TOKENS = int(os.getenv("MINUTES_MAX_NEW_TOKENS", "256"))
+MINUTES_MAX_NEW_TOKENS = _env_int("MINUTES_MAX_NEW_TOKENS", 256)
 MINUTES_MODE = os.getenv("MINUTES_MODE", "llm")  # fast | llm | auto
 MINUTES_MAX_INPUT_CHARS = int(os.getenv("MINUTES_MAX_INPUT_CHARS", "4000"))
 MINUTES_BACKEND = os.getenv("MINUTES_BACKEND", "openvino")  # openvino | torch

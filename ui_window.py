@@ -16,15 +16,30 @@ class MinutesWorker(QtCore.QObject):
     finished = QtCore.Signal(str)
     error = QtCore.Signal(str)
 
-    def __init__(self, raw_text: str):
+    def __init__(self, raw_text: str, out_dir: str, stamp: str, suffix: str):
         super().__init__()
         self._raw_text = raw_text
+        self._out_dir = out_dir
+        self._stamp = stamp
+        self._suffix = suffix
 
     @QtCore.Slot()
     def run(self):
         raw = (self._raw_text or "").strip()
         if not raw:
             self.finished.emit("")
+            return
+        try:
+            out_path = (
+                Path(self._out_dir)
+                / f"{self._stamp}_minutes_source_{self._suffix}.txt"
+            )
+            with open(out_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(raw)
+            with open(out_path, "r", encoding="utf-8") as f:
+                raw = f.read().strip()
+        except OSError as exc:
+            self.error.emit(str(exc))
             return
         mode = (MINUTES_MODE or "fast").lower()
         use_llm = mode == "llm"
@@ -79,7 +94,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.start_btn = QtWidgets.QPushButton("Start")
         self.stop_btn = QtWidgets.QPushButton("Stop")
         self.save_btn = QtWidgets.QPushButton("Save Script")
-        self.minutes_btn = QtWidgets.QPushButton("Save Minutes")
+        self.minutes_file_btn = QtWidgets.QPushButton("Minutes from Script")
         self.reset_btn = QtWidgets.QPushButton("Reset Text")
         self.stop_btn.setEnabled(False)
         self.system_audio = QtWidgets.QCheckBox("System Audio")
@@ -98,8 +113,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.short_toggle.setChecked(True)
         self.translate_toggle = QtWidgets.QCheckBox("Translate")
         self.translate_toggle.setChecked(True)
-        self.minutes_source = QtWidgets.QComboBox()
-        self.minutes_source.addItems(["Minutes from ASR", "Minutes from Translation"])
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setFixedHeight(10)
@@ -110,7 +123,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.start_btn.clicked.connect(self._start)
         self.stop_btn.clicked.connect(self._stop)
         self.save_btn.clicked.connect(self._save_script)
-        self.minutes_btn.clicked.connect(self._save_minutes)
+        self.minutes_file_btn.clicked.connect(self._save_minutes_from_script)
         self.reset_btn.clicked.connect(self._reset_text)
         self.lang_select.currentIndexChanged.connect(self._set_source_lang)
         self.engine_select.currentIndexChanged.connect(self._toggle_engine_fields)
@@ -121,7 +134,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_row_top.addWidget(self.stop_btn)
         btn_row_top.addSpacing(4)
         btn_row_top.addWidget(self.save_btn)
-        btn_row_top.addWidget(self.minutes_btn)
+        btn_row_top.addWidget(self.minutes_file_btn)
         btn_row_top.addWidget(self.reset_btn)
         btn_row_top.addStretch(1)
         btn_row_top.addWidget(self.progress)
@@ -137,7 +150,6 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_row_bottom.addSpacing(8)
         btn_row_bottom.addWidget(self.short_toggle)
         btn_row_bottom.addWidget(self.translate_toggle)
-        btn_row_bottom.addWidget(self.minutes_source)
         btn_row_bottom.addStretch(1)
 
         btn_row_engine = QtWidgets.QHBoxLayout()
@@ -175,6 +187,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_detected_lang = "ja"
         self._minutes_thread: Optional[QtCore.QThread] = None
         self._minutes_dialog: Optional[QtWidgets.QProgressDialog] = None
+        self._minutes_out_dir: Optional[str] = None
+        self._minutes_stamp: Optional[str] = None
+        self._minutes_suffix: Optional[str] = None
         self._toggle_engine_fields()
         self._update_language_labels()
         self._update_language_order()
@@ -290,26 +305,40 @@ class MainWindow(QtWidgets.QMainWindow):
         except OSError as exc:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(exc))
 
-    def _save_minutes(self):
-        use_translation = self.minutes_source.currentIndex() == 1
-        if self._current_source_lang == "ja":
-            source_text = self._short_jp.render_plain()
-            translated_text = self._short_en.render_plain()
-        else:
-            source_text = self._short_en.render_plain()
-            translated_text = self._short_jp.render_plain()
-
-        raw_text = translated_text if use_translation else source_text
-        if not raw_text.strip():
-            QtWidgets.QMessageBox.information(
-                self, "No text", "Minutes source text is empty."
-            )
-            return
+    def _save_minutes_from_script(self):
         if self._minutes_thread is not None:
             QtWidgets.QMessageBox.information(
                 self, "Working", "Minutes are already being generated."
             )
             return
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select script file",
+            "",
+            "Text Files (*.txt);;All Files (*)",
+        )
+        if not file_path:
+            return
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                raw_text = f.read()
+        except OSError as exc:
+            QtWidgets.QMessageBox.critical(self, "Open failed", str(exc))
+            return
+
+        raw_text = (raw_text or "").strip()
+        if not raw_text:
+            QtWidgets.QMessageBox.information(
+                self, "No text", "Minutes source text is empty."
+            )
+            return
+
+        out_dir = str(Path(file_path).parent)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        suffix = "script"
+        self._minutes_out_dir = out_dir
+        self._minutes_stamp = stamp
+        self._minutes_suffix = suffix
 
         self._minutes_dialog = QtWidgets.QProgressDialog(
             "Generating minutes...", "Cancel", 0, 0, self
@@ -321,12 +350,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._minutes_dialog.show()
 
         self._minutes_thread = QtCore.QThread()
-        worker = MinutesWorker(raw_text)
+        worker = MinutesWorker(raw_text, out_dir, stamp, suffix)
         worker.moveToThread(self._minutes_thread)
         self._minutes_thread.started.connect(worker.run)
-        worker.finished.connect(
-            lambda text: self._save_minutes_text(text, use_translation)
-        )
+        worker.finished.connect(lambda text: self._save_minutes_text(text, False))
         worker.finished.connect(self._close_minutes_dialog)
         worker.finished.connect(self._minutes_thread.quit)
         worker.finished.connect(worker.deleteLater)
@@ -343,15 +370,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self, "No text", "Minutes source text is empty."
             )
             return
-
-        out_dir = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "Select folder to save minutes", ""
-        )
-        if not out_dir:
-            return
-
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        suffix = "translation" if use_translation else "asr"
+        out_dir = self._minutes_out_dir or ""
+        stamp = self._minutes_stamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+        suffix = self._minutes_suffix or ("translation" if use_translation else "asr")
         out_path = Path(out_dir) / f"{stamp}_minutes_{suffix}.txt"
 
         try:
@@ -364,6 +385,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._minutes_thread is not None:
             self._minutes_thread.deleteLater()
         self._minutes_thread = None
+        self._minutes_out_dir = None
+        self._minutes_stamp = None
+        self._minutes_suffix = None
 
     def _cancel_minutes_generation(self):
         if self._minutes_thread is not None:
