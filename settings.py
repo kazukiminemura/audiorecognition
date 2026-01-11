@@ -28,4 +28,7 @@ VAD_MIN_SPEECH_MS = int(os.getenv("VAD_MIN_SPEECH_MS", "250"))
 VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "100"))
 VAD_WINDOW_SAMPLES = int(os.getenv("VAD_WINDOW_SAMPLES", "512"))
 
+MINUTES_MODEL_ID = os.getenv("MINUTES_MODEL_ID", "LiquidAI/LFM2.5-1.2B-Instruct")
+MINUTES_MAX_NEW_TOKENS = int(os.getenv("MINUTES_MAX_NEW_TOKENS", "256"))
+
 WARNED_DENOISE = set()

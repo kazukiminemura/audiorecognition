@@ -20,3 +20,4 @@ torchcodec
 sacremoses
 liquid-audio
 silero-vad
+huggingface_hub
