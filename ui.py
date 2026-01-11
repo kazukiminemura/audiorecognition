@@ -7,24 +7,6 @@ from PySide6 import QtCore, QtWidgets
 from audio_io import record_audio
 from ui_engine import AudioProducer, PipelineFactory, SpeechEngine
 from ui_window import MainWindow
-from model_preload import preload_models
-
-
-class PreloadWorker(QtCore.QObject):
-    progress = QtCore.Signal(str)
-    finished = QtCore.Signal(bool)
-    error = QtCore.Signal(str)
-
-    @QtCore.Slot()
-    def run(self):
-        try:
-            ok = preload_models(
-                progress_cb=self.progress.emit,
-                is_cancelled=QtCore.QThread.currentThread().isInterruptionRequested,
-            )
-            self.finished.emit(ok)
-        except Exception as exc:
-            self.error.emit(str(exc))
 
 
 def main():
@@ -42,29 +24,25 @@ def main():
         dialog.setWindowModality(QtCore.Qt.WindowModal)
         dialog.setMinimumDuration(0)
 
-        thread = QtCore.QThread()
-        worker = PreloadWorker()
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.progress.connect(dialog.setLabelText)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        worker.error.connect(thread.quit)
-        worker.error.connect(worker.deleteLater)
+        proc = QtCore.QProcess(window)
+        proc.setProgram(sys.executable)
+        proc.setArguments(["download_models.py"])
+        proc.setWorkingDirectory(os.path.dirname(os.path.abspath(__file__)))
 
-        def _finish(ok: bool):
+        def _finish():
             dialog.close()
 
-        worker.finished.connect(_finish)
-        worker.error.connect(
-            lambda msg: QtWidgets.QMessageBox.critical(window, "Error", msg)
-        )
-        thread.finished.connect(thread.deleteLater)
+        def _error(_err):
+            dialog.close()
+            QtWidgets.QMessageBox.critical(
+                window, "Error", "Model download process failed."
+            )
 
-        dialog.canceled.connect(thread.requestInterruption)
-        dialog.canceled.connect(thread.quit)
+        proc.finished.connect(_finish)
+        proc.errorOccurred.connect(_error)
+        dialog.canceled.connect(proc.kill)
 
-        thread.start()
+        proc.start()
         dialog.show()
     sys.exit(app.exec())
 
