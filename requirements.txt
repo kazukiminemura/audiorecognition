@@ -21,3 +21,4 @@ sacremoses
 liquid-audio
 silero-vad
 huggingface_hub
+hf_xet
