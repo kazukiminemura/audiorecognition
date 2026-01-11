@@ -3,8 +3,14 @@ import os
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from optimum.intel import OVModelForCausalLM
 
-from settings import MINUTES_MAX_NEW_TOKENS, MINUTES_MODEL_ID, PROJECT_MODELS_DIR
+from settings import (
+    MINUTES_BACKEND,
+    MINUTES_MAX_NEW_TOKENS,
+    MINUTES_MODEL_ID,
+    PROJECT_MODELS_DIR,
+)
 
 _SUMMARIZER = None
 
@@ -16,9 +22,17 @@ class MinutesSummarizer:
         hf_env._init_hf_env()
         self._model_id = model_id
         self._tokenizer = AutoTokenizer.from_pretrained(model_id)
-        self._model = AutoModelForCausalLM.from_pretrained(model_id)
-        self._model = self._model.to("cpu")
-        self._model.eval()
+        backend = (MINUTES_BACKEND or "openvino").lower()
+        if backend == "openvino":
+            device = os.getenv("OPENVINO_DEVICE", "GPU")
+            print(f"[minutes] openvino device={device}", flush=True)
+            self._model = OVModelForCausalLM.from_pretrained(
+                model_id, from_onnx=True, device=device
+            )
+        else:
+            self._model = AutoModelForCausalLM.from_pretrained(model_id)
+            self._model = self._model.to("cpu")
+            self._model.eval()
 
     def summarize(self, text: str) -> str:
         cleaned = (text or "").strip()

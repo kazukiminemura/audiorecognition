@@ -5,7 +5,7 @@ from typing import Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from settings import LFM2_AUDIO_REPO
+from settings import LFM2_AUDIO_REPO, MINUTES_MAX_INPUT_CHARS, MINUTES_MODE
 from ui_engine import RunConfig, SpeechEngine
 from ui_models import SpeakerTextAccumulator, SpeakerPalette
 from summarize import summarize_text
@@ -22,14 +22,31 @@ class MinutesWorker(QtCore.QObject):
 
     @QtCore.Slot()
     def run(self):
+        raw = (self._raw_text or "").strip()
+        if not raw:
+            self.finished.emit("")
+            return
+        mode = (MINUTES_MODE or "fast").lower()
+        use_llm = mode == "llm"
+        if mode == "auto":
+            use_llm = len(raw) <= MINUTES_MAX_INPUT_CHARS
+
+        if use_llm and len(raw) > MINUTES_MAX_INPUT_CHARS:
+            raw = raw[:MINUTES_MAX_INPUT_CHARS]
+
         try:
-            minutes_text = get_minutes_summarizer().summarize(self._raw_text)
-        except Exception:
-            try:
-                minutes_text = summarize_text(self._raw_text)
-            except Exception as exc:
-                self.error.emit(str(exc))
-                return
+            print(
+                f"[minutes] mode={'llm' if use_llm else 'fast'} "
+                f"chars={len(raw)} max_chars={MINUTES_MAX_INPUT_CHARS}",
+                flush=True,
+            )
+            if use_llm:
+                minutes_text = get_minutes_summarizer().summarize(raw)
+            else:
+                minutes_text = summarize_text(raw)
+        except Exception as exc:
+            self.error.emit(str(exc))
+            return
         self.finished.emit(minutes_text)
 
 

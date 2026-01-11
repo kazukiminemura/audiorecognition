@@ -31,7 +31,12 @@ VAD_MIN_SPEECH_MS = int(os.getenv("VAD_MIN_SPEECH_MS", "250"))
 VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "100"))
 VAD_WINDOW_SAMPLES = int(os.getenv("VAD_WINDOW_SAMPLES", "512"))
 
-MINUTES_MODEL_ID = os.getenv("MINUTES_MODEL_ID", "LiquidAI/LFM2.5-1.2B-Instruct")
+MINUTES_MODEL_ID = os.getenv(
+    "MINUTES_MODEL_ID", "LiquidAI/LFM2.5-1.2B-Instruct-ONNX"
+)
 MINUTES_MAX_NEW_TOKENS = int(os.getenv("MINUTES_MAX_NEW_TOKENS", "256"))
+MINUTES_MODE = os.getenv("MINUTES_MODE", "llm")  # fast | llm | auto
+MINUTES_MAX_INPUT_CHARS = int(os.getenv("MINUTES_MAX_INPUT_CHARS", "4000"))
+MINUTES_BACKEND = os.getenv("MINUTES_BACKEND", "openvino")  # openvino | torch
 
 WARNED_DENOISE = set()
