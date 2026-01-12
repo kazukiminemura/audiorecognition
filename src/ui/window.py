@@ -10,6 +10,8 @@ from src.engine.ui_engine import RunConfig, SpeechEngine
 from src.ui_models import SpeakerTextAccumulator, SpeakerPalette
 from src.minutes.summarizer import get_minutes_summarizer
 
+AUTO_MINUTES_INTERVAL_SEC = 180
+
 
 class MinutesWorker(QtCore.QObject):
     finished = QtCore.Signal(str)
@@ -79,7 +81,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_btn = QtWidgets.QPushButton("Stop")
         self.save_btn = QtWidgets.QPushButton("Save Script")
         self.minutes_file_btn = QtWidgets.QPushButton("Minutes from Script")
-        self.minutes_current_btn = QtWidgets.QPushButton("Minutes from Current")
+        # "Minutes from Current" removed per request.
         self.reset_btn = QtWidgets.QPushButton("Reset Text")
         self.stop_btn.setEnabled(False)
         self.system_audio = QtWidgets.QCheckBox("System Audio")
@@ -98,6 +100,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.short_toggle.setChecked(True)
         self.translate_toggle = QtWidgets.QCheckBox("Translate")
         self.translate_toggle.setChecked(True)
+        self.auto_minutes_toggle = QtWidgets.QCheckBox("Auto Minutes (3 min)")
+        self.auto_minutes_toggle.setChecked(True)
+        self.auto_minutes_countdown = QtWidgets.QLabel("Auto minutes: off")
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setFixedHeight(10)
@@ -109,12 +114,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_btn.clicked.connect(self._stop)
         self.save_btn.clicked.connect(self._save_script)
         self.minutes_file_btn.clicked.connect(self._save_minutes_from_script)
-        self.minutes_current_btn.clicked.connect(self._save_minutes_from_current)
         self.reset_btn.clicked.connect(self._reset_text)
         self.lang_select.currentIndexChanged.connect(self._set_source_lang)
         self.engine_select.currentIndexChanged.connect(self._toggle_engine_fields)
         self.short_toggle.toggled.connect(self._engine.set_short_enabled)
         self.translate_toggle.toggled.connect(self._engine.set_translation_enabled)
+        self.auto_minutes_toggle.toggled.connect(self._on_auto_minutes_toggled)
         self.chunk_spin.valueChanged.connect(self._on_chunk_seconds_changed)
 
         btn_row_top.addWidget(self.start_btn)
@@ -122,7 +127,6 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_row_top.addSpacing(4)
         btn_row_top.addWidget(self.save_btn)
         btn_row_top.addWidget(self.minutes_file_btn)
-        btn_row_top.addWidget(self.minutes_current_btn)
         btn_row_top.addWidget(self.reset_btn)
         btn_row_top.addStretch(1)
         btn_row_top.addWidget(self.progress)
@@ -138,6 +142,8 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_row_bottom.addSpacing(8)
         btn_row_bottom.addWidget(self.short_toggle)
         btn_row_bottom.addWidget(self.translate_toggle)
+        btn_row_bottom.addWidget(self.auto_minutes_toggle)
+        btn_row_bottom.addWidget(self.auto_minutes_countdown)
         btn_row_bottom.addStretch(1)
 
         btn_row_engine = QtWidgets.QHBoxLayout()
@@ -195,12 +201,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self._minutes_suffix: Optional[str] = None
         self._minutes_worker: Optional[QtCore.QObject] = None
         self._minutes_use_translation: bool = False
+        self._auto_minutes_remaining_sec = AUTO_MINUTES_INTERVAL_SEC
+        self._is_listening = False
+        self._auto_minutes_timer = QtCore.QTimer(self)
+        self._auto_minutes_timer.setInterval(AUTO_MINUTES_INTERVAL_SEC * 1000)
+        self._auto_minutes_timer.timeout.connect(self._auto_minutes_tick)
+        self._auto_minutes_countdown_timer = QtCore.QTimer(self)
+        self._auto_minutes_countdown_timer.setInterval(1000)
+        self._auto_minutes_countdown_timer.timeout.connect(
+            self._update_auto_minutes_countdown
+        )
         self._toggle_engine_fields()
         self._update_language_labels()
         self._update_language_order()
 
     def closeEvent(self, event):
         self._engine.stop()
+        self._stop_auto_minutes()
         event.accept()
 
     def _apply_style(self):
@@ -248,11 +265,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._engine.set_translation_enabled(cfg.enable_translation)
         self._engine.start(cfg)
         self._engine.set_source_lang(source_lang)
+        self._start_auto_minutes()
         self._update_language_labels()
         self._update_language_order()
 
     def _stop(self):
         self._engine.stop()
+        self._stop_auto_minutes()
 
     def _set_source_lang(self, idx: int):
         source_lang = "ja" if idx == 0 else "en"
@@ -346,35 +365,14 @@ class MainWindow(QtWidgets.QMainWindow):
         out_dir = str(_get_minutes_output_dir())
         self._start_minutes_generation(raw_text, out_dir, "script", False)
 
-    def _save_minutes_from_current(self):
-        if self._minutes_thread is not None:
-            QtWidgets.QMessageBox.information(
-                self, "Working", "Minutes are already being generated."
-            )
-            return
-
-        source_lang = (
-            self._last_detected_lang
-            if self._current_source_lang == "auto"
-            else self._current_source_lang
-        )
-        if source_lang == "ja":
-            raw_text = self._short_jp.render_plain()
-        else:
-            raw_text = self._short_en.render_plain()
-
-        raw_text = (raw_text or "").strip()
-        if not raw_text:
-            QtWidgets.QMessageBox.information(
-                self, "No text", "Minutes source text is empty."
-            )
-            return
-
-        out_dir = str(_get_minutes_output_dir())
-        self._start_minutes_generation(raw_text, out_dir, "current", False)
-
     def _start_minutes_generation(
-        self, raw_text: str, out_dir: str, suffix: str, use_translation: bool
+        self,
+        raw_text: str,
+        out_dir: str,
+        suffix: str,
+        use_translation: bool,
+        show_dialog: bool = True,
+        show_errors: bool = True,
     ):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._minutes_out_dir = out_dir
@@ -386,14 +384,15 @@ class MainWindow(QtWidgets.QMainWindow):
             flush=True,
         )
 
-        self._minutes_dialog = QtWidgets.QProgressDialog(
-            "Generating minutes...", "Cancel", 0, 0, self
-        )
-        self._minutes_dialog.setWindowTitle("Please wait")
-        self._minutes_dialog.canceled.connect(self._cancel_minutes_generation)
-        self._minutes_dialog.setWindowModality(QtCore.Qt.WindowModal)
-        self._minutes_dialog.setMinimumDuration(0)
-        self._minutes_dialog.show()
+        if show_dialog:
+            self._minutes_dialog = QtWidgets.QProgressDialog(
+                "Generating minutes...", "Cancel", 0, 0, self
+            )
+            self._minutes_dialog.setWindowTitle("Please wait")
+            self._minutes_dialog.canceled.connect(self._cancel_minutes_generation)
+            self._minutes_dialog.setWindowModality(QtCore.Qt.WindowModal)
+            self._minutes_dialog.setMinimumDuration(0)
+            self._minutes_dialog.show()
 
         self._minutes_thread = QtCore.QThread()
         worker = MinutesWorker(raw_text, out_dir, stamp, suffix)
@@ -404,11 +403,16 @@ class MainWindow(QtWidgets.QMainWindow):
             lambda: print("[minutes] worker thread started", flush=True)
         )
         worker.finished.connect(self._on_minutes_finished)
-        worker.finished.connect(self._close_minutes_dialog)
+        if show_dialog:
+            worker.finished.connect(self._close_minutes_dialog)
         worker.finished.connect(self._minutes_thread.quit)
         worker.finished.connect(worker.deleteLater)
-        worker.error.connect(self._show_error)
-        worker.error.connect(self._close_minutes_dialog)
+        if show_errors:
+            worker.error.connect(self._show_error)
+        else:
+            worker.error.connect(self._log_minutes_error)
+        if show_dialog:
+            worker.error.connect(self._close_minutes_dialog)
         worker.error.connect(self._minutes_thread.quit)
         worker.error.connect(worker.deleteLater)
         self._minutes_thread.finished.connect(self._clear_minutes_thread)
@@ -497,12 +501,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_status(self, status: str):
         self.status_lbl.setText(status)
         if status == "Listening":
+            self._is_listening = True
             self.start_btn.setEnabled(False)
             self.stop_btn.setEnabled(True)
             self.progress.setVisible(False)
             self.engine_select.setEnabled(False)
             self.lfm2_repo.setEnabled(False)
+            self._start_auto_minutes()
         elif status in ("Idle", "Stopping..."):
+            self._is_listening = False
             self.start_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
             self.progress.setVisible(False)
@@ -511,7 +518,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.chunk_spin.setEnabled(True)
             self.engine_select.setEnabled(True)
             self._toggle_engine_fields()
+            self._stop_auto_minutes()
         elif status == "Starting...":
+            self._is_listening = False
             self.start_btn.setEnabled(False)
             self.stop_btn.setEnabled(True)
             self.progress.setVisible(True)
@@ -521,6 +530,10 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(str)
     def _show_error(self, message: str):
         QtWidgets.QMessageBox.critical(self, "Error", message)
+
+    @QtCore.Slot(str)
+    def _log_minutes_error(self, message: str):
+        print(f"[minutes] error={message}", flush=True)
 
     @QtCore.Slot(str)
     def _on_minutes_finished(self, minutes_text: str):
@@ -541,6 +554,66 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_chunk_seconds_changed(self, value: float):
         self._engine.set_chunk_seconds(value)
+
+    def _on_auto_minutes_toggled(self, enabled: bool):
+        if enabled:
+            self._start_auto_minutes()
+        else:
+            self._stop_auto_minutes()
+
+    def _start_auto_minutes(self):
+        if not self._is_listening:
+            return
+        if self.auto_minutes_toggle.isChecked():
+            self._auto_minutes_remaining_sec = AUTO_MINUTES_INTERVAL_SEC
+            self._update_auto_minutes_countdown()
+            self._auto_minutes_timer.start()
+            self._auto_minutes_countdown_timer.start()
+
+    def _stop_auto_minutes(self):
+        if self._auto_minutes_timer.isActive():
+            self._auto_minutes_timer.stop()
+        if self._auto_minutes_countdown_timer.isActive():
+            self._auto_minutes_countdown_timer.stop()
+        self.auto_minutes_countdown.setText("Auto minutes: off")
+
+    def _auto_minutes_tick(self):
+        self._auto_minutes_remaining_sec = AUTO_MINUTES_INTERVAL_SEC
+        self._update_auto_minutes_countdown()
+        if self._minutes_thread is not None:
+            return
+        source_lang = (
+            self._last_detected_lang
+            if self._current_source_lang == "auto"
+            else self._current_source_lang
+        )
+        if source_lang == "ja":
+            raw_text = self._short_jp.render_plain()
+        else:
+            raw_text = self._short_en.render_plain()
+        raw_text = (raw_text or "").strip()
+        if not raw_text:
+            return
+        out_dir = str(_get_minutes_output_dir())
+        self._start_minutes_generation(
+            raw_text,
+            out_dir,
+            "auto",
+            False,
+            show_dialog=False,
+            show_errors=False,
+        )
+
+    def _update_auto_minutes_countdown(self):
+        if not self._is_listening or not self._auto_minutes_timer.isActive():
+            self.auto_minutes_countdown.setText("Auto minutes: off")
+            return
+        remaining = max(self._auto_minutes_remaining_sec, 0)
+        mins, secs = divmod(remaining, 60)
+        self.auto_minutes_countdown.setText(
+            f"Next minutes in {mins:02d}:{secs:02d}"
+        )
+        self._auto_minutes_remaining_sec = max(remaining - 1, 0)
 
     def _update_language_labels(self):
         self._update_language_labels_for(self._current_source_lang)
