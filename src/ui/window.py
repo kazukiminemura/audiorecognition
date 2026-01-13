@@ -54,7 +54,7 @@ class MinutesWorker(QtCore.QObject):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, engine: SpeechEngine):
         super().__init__()
-        self.setWindowTitle("Speech -> English")
+        self.setWindowTitle("Speech Recognition + Translation + Minutes")
         icon_path = _resource_path(Path("deployment") / "favicon.ico")
         if icon_path.exists():
             self.setWindowIcon(QtGui.QIcon(str(icon_path)))
@@ -72,7 +72,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setSpacing(12)
         self._content_layout = layout
 
-        title = QtWidgets.QLabel("Speech Recognition + Translation")
+        title = QtWidgets.QLabel("Speech Recognition + Translation + Minutes")
         title.setObjectName("Title")
 
         btn_row_top = QtWidgets.QHBoxLayout()
