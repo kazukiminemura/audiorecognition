@@ -2,6 +2,7 @@ from src import hf_env  # ensure HF env defaults before other imports
 import os
 
 from huggingface_hub import snapshot_download
+from silero_vad import load_silero_vad
 
 from src.settings import (
     DEFAULT_MODEL_ID,
@@ -16,8 +17,25 @@ def _env_flag(name: str, default: str = "0") -> bool:
     return os.getenv(name, default) not in ("0", "false", "False", "no", "NO")
 
 
+def _preload_vad(progress_cb=None, is_cancelled=None) -> bool:
+    if is_cancelled and is_cancelled():
+        return False
+    if progress_cb:
+        progress_cb("Downloading VAD model...")
+    os.environ.setdefault("TORCH_HOME", PROJECT_MODELS_DIR)
+    model = load_silero_vad()
+    model = model.to("cpu")
+    model.eval()
+    return True
+
+
 def preload_models(
-    progress_cb=None, is_cancelled=None, *, include_minutes=None, include_lfm2=None
+    progress_cb=None,
+    is_cancelled=None,
+    *,
+    include_minutes=None,
+    include_lfm2=None,
+    include_vad=None,
 ):
     os.environ.setdefault("HF_HOME", PROJECT_MODELS_DIR)
     # Re-assert in case callers changed env after import.
@@ -39,6 +57,8 @@ def preload_models(
         include_minutes = _env_flag("PRELOAD_MINUTES_MODEL", "0")
     if include_lfm2 is None:
         include_lfm2 = _env_flag("PRELOAD_LFM2_MODEL", "0")
+    if include_vad is None:
+        include_vad = _env_flag("PRELOAD_VAD_MODEL", "0")
 
     models = [
         ("Downloading Whisper model...", DEFAULT_MODEL_ID),
@@ -52,5 +72,8 @@ def preload_models(
     for label, model_id in models:
         if not step(label, model_id):
             return False
+
+    if include_vad and not _preload_vad(progress_cb=progress_cb, is_cancelled=is_cancelled):
+        return False
 
     return True

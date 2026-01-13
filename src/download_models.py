@@ -17,7 +17,9 @@ def main():
 
     include_extras = not args.core_only
     ok = preload_models(
-        include_minutes=include_extras, include_lfm2=include_extras
+        include_minutes=include_extras,
+        include_lfm2=include_extras,
+        include_vad=include_extras,
     )
     raise SystemExit(0 if ok else 1)
 
