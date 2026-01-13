@@ -2,6 +2,7 @@ import librosa
 import numpy as np
 import soundfile as sf
 import pyaudiowpatch as pyaudio
+import os
 
 from src.settings import (
     DEFAULT_MIC_DEVICE,
@@ -9,6 +10,15 @@ from src.settings import (
     MIC_INPUT_SAMPLE_RATE,
     SAMPLE_FORMAT,
 )
+
+_DEBUG_AUDIO = os.getenv("AUDIO_DEBUG", "0") not in ("", "0", "false", "False")
+_LOOPBACK_DEVICE_ENV = os.getenv("AUDIO_LOOPBACK_DEVICE", "").strip()
+_OUTPUT_DEVICE_ENV = os.getenv("AUDIO_OUTPUT_DEVICE", "").strip()
+
+
+def _debug(msg: str):
+    if _DEBUG_AUDIO:
+        print(f"[audio] {msg}", flush=True)
 
 
 def load_audio(path, target_sr):
@@ -47,13 +57,37 @@ def list_devices():
 
 
 def _get_default_output(pa):
-    api = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-    return pa.get_device_info_by_index(api["defaultOutputDevice"])
+    try:
+        api = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+        idx = int(api.get("defaultOutputDevice", -1))
+        if 0 <= idx < pa.get_device_count():
+            return pa.get_device_info_by_index(idx)
+    except Exception as exc:
+        _debug(f"failed to read WASAPI default output: {exc}")
+
+    for idx in range(pa.get_device_count()):
+        info = pa.get_device_info_by_index(idx)
+        if info.get("maxOutputChannels", 0) > 0 and not info.get("isLoopbackDevice"):
+            _debug("using first available output device")
+            return info
+    raise RuntimeError("No output device found.")
 
 
 def _get_default_input(pa):
-    api = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-    return pa.get_device_info_by_index(api["defaultInputDevice"])
+    try:
+        api = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+        idx = int(api.get("defaultInputDevice", -1))
+        if 0 <= idx < pa.get_device_count():
+            return pa.get_device_info_by_index(idx)
+    except Exception as exc:
+        _debug(f"failed to read WASAPI default input: {exc}")
+
+    for idx in range(pa.get_device_count()):
+        info = pa.get_device_info_by_index(idx)
+        if info.get("maxInputChannels", 0) > 0 and not info.get("isLoopbackDevice"):
+            _debug("using first available input device")
+            return info
+    raise RuntimeError("No input device found.")
 
 
 def _is_loopback_device(info):
@@ -154,7 +188,12 @@ def record_audio(duration_s, target_sr, device=None, loopback=False):
     pa = pyaudio.PyAudio()
     try:
         if loopback:
-            dev_info = _find_loopback_device(pa, device)
+            resolved_device = device
+            if resolved_device is None:
+                resolved_device = _LOOPBACK_DEVICE_ENV or _OUTPUT_DEVICE_ENV or None
+            if resolved_device is not None:
+                _debug(f"loopback device override='{resolved_device}'")
+            dev_info = _find_loopback_device(pa, resolved_device)
             max_ch = int(dev_info.get("maxInputChannels", 2))
             channels = 2 if max_ch >= 2 else 1
         else:
@@ -169,6 +208,11 @@ def record_audio(duration_s, target_sr, device=None, loopback=False):
             int(dev_info.get("defaultSampleRate", MIC_INPUT_SAMPLE_RATE))
             if loopback
             else MIC_INPUT_SAMPLE_RATE
+        )
+        _debug(
+            "open stream "
+            f"loopback={loopback} device='{dev_info.get('name')}' "
+            f"index={dev_info.get('index')} sr={samplerate} ch={channels}"
         )
         stream = pa.open(
             format=SAMPLE_FORMAT,
@@ -191,9 +235,14 @@ def record_audio(duration_s, target_sr, device=None, loopback=False):
 
     audio = _bytes_to_float32(raw, channels)
     if audio.size == 0:
+        _debug("captured empty audio buffer")
         return audio, samplerate
     if audio.ndim > 1:
         audio = np.mean(audio, axis=1)
+    if _DEBUG_AUDIO:
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        rms = float(np.sqrt(np.mean(audio ** 2))) if audio.size else 0.0
+        _debug(f"captured samples={audio.size} peak={peak:.5f} rms={rms:.5f}")
     input_sr = samplerate
     if target_sr is not None and input_sr != target_sr:
         audio = librosa.resample(audio, orig_sr=input_sr, target_sr=target_sr)

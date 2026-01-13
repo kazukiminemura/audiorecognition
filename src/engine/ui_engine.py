@@ -1,3 +1,4 @@
+import os
 import threading
 from dataclasses import dataclass
 from queue import Queue, Empty
@@ -11,6 +12,14 @@ from src.pipeline_impl import JaToEnTranslator, EnToJaTranslator
 from src.lfm2_transcriber import LFM2AudioTranscriber
 from src.whisper_transcriber import WhisperOVTranscriber
 from src.vad import SileroVAD
+
+_DEBUG_AUDIO = os.getenv("AUDIO_DEBUG", "0") not in ("", "0", "false", "False")
+_BYPASS_VAD = os.getenv("AUDIO_BYPASS_VAD", "0") not in ("", "0", "false", "False")
+
+
+def _debug(msg: str):
+    if _DEBUG_AUDIO:
+        print(f"[audio] {msg}", flush=True)
 
 
 @dataclass(frozen=True)
@@ -62,8 +71,10 @@ class AudioProducer:
                 loopback=use_loopback,
             )
             if audio.size == 0:
+                _debug("producer got empty audio chunk")
                 continue
-            if vad is not None and not vad.has_speech(audio, sr):
+            if not _BYPASS_VAD and vad is not None and not vad.has_speech(audio, sr):
+                _debug("producer dropped chunk: VAD no speech")
                 continue
             if out_short is not None and enable_short():
                 out_short.put((audio, sr))

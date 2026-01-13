@@ -34,8 +34,23 @@ def _list_devices(pa):
 
 
 def _get_default_output(pa):
-    api = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-    return pa.get_device_info_by_index(api["defaultOutputDevice"])
+    try:
+        api = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+        idx = int(api.get("defaultOutputDevice", -1))
+        if 0 <= idx < pa.get_device_count():
+            return pa.get_device_info_by_index(idx)
+    except Exception as exc:
+        print(f"Warning: failed to read WASAPI default output ({exc}).")
+
+    for idx in range(pa.get_device_count()):
+        info = pa.get_device_info_by_index(idx)
+        if info.get("maxOutputChannels", 0) > 0 and not info.get("isLoopbackDevice"):
+            print("Warning: using first available output device.")
+            return info
+
+    print("No output device found.")
+    _list_devices(pa)
+    raise SystemExit(1)
 
 
 def _find_output_device(pa, name_substring=None):
@@ -74,8 +89,23 @@ def _find_input_device(pa, name_substring=None):
         print(f"Microphone matching '{name_substring}' not found.")
         _list_devices(pa)
         raise SystemExit(1)
-    api = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-    return pa.get_device_info_by_index(api["defaultInputDevice"])
+    try:
+        api = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+        idx = int(api.get("defaultInputDevice", -1))
+        if 0 <= idx < pa.get_device_count():
+            return pa.get_device_info_by_index(idx)
+    except Exception as exc:
+        print(f"Warning: failed to read WASAPI default input ({exc}).")
+
+    for idx in range(pa.get_device_count()):
+        info = pa.get_device_info_by_index(idx)
+        if info.get("maxInputChannels", 0) > 0 and not info.get("isLoopbackDevice"):
+            print("Warning: using first available input device.")
+            return info
+
+    print("No input device found.")
+    _list_devices(pa)
+    raise SystemExit(1)
 
 
 def _read_stream_frames(stream, total_frames, channels, samplerate):

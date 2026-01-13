@@ -96,8 +96,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chunk_spin.setSingleStep(0.5)
         self.chunk_spin.setValue(1.0)
         self.chunk_spin.setSuffix(" s")
-        self.short_toggle = QtWidgets.QCheckBox("Short")
-        self.short_toggle.setChecked(True)
         self.translate_toggle = QtWidgets.QCheckBox("Translate")
         self.translate_toggle.setChecked(True)
         self.auto_minutes_toggle = QtWidgets.QCheckBox("Auto Minutes (3 min)")
@@ -117,7 +115,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reset_btn.clicked.connect(self._reset_text)
         self.lang_select.currentIndexChanged.connect(self._set_source_lang)
         self.engine_select.currentIndexChanged.connect(self._toggle_engine_fields)
-        self.short_toggle.toggled.connect(self._engine.set_short_enabled)
         self.translate_toggle.toggled.connect(self._engine.set_translation_enabled)
         self.auto_minutes_toggle.toggled.connect(self._on_auto_minutes_toggled)
         self.chunk_spin.valueChanged.connect(self._on_chunk_seconds_changed)
@@ -140,7 +137,6 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_row_bottom.addWidget(QtWidgets.QLabel("Chunk"))
         btn_row_bottom.addWidget(self.chunk_spin)
         btn_row_bottom.addSpacing(8)
-        btn_row_bottom.addWidget(self.short_toggle)
         btn_row_bottom.addWidget(self.translate_toggle)
         btn_row_bottom.addWidget(self.auto_minutes_toggle)
         btn_row_bottom.addWidget(self.auto_minutes_countdown)
@@ -154,12 +150,12 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_row_engine.addWidget(self.lfm2_repo)
         btn_row_engine.addStretch(1)
 
-        self.jp_label = QtWidgets.QLabel("Short (single chunk) - Japanese")
+        self.jp_label = QtWidgets.QLabel("Japanese")
         self.jp_label.setObjectName("Section")
         self.jp_text = QtWidgets.QTextEdit()
         self.jp_text.setReadOnly(True)
 
-        self.en_label = QtWidgets.QLabel("Short (single chunk) - English")
+        self.en_label = QtWidgets.QLabel("English")
         self.en_label.setObjectName("Section")
         self.en_text = QtWidgets.QTextEdit()
         self.en_text.setReadOnly(True)
@@ -227,6 +223,8 @@ class MainWindow(QtWidgets.QMainWindow):
             QMainWindow { background: #f6f8fb; }
             QLabel#Title { font-size: 16pt; font-weight: 600; color: #0b1f33; }
             QLabel#Section { font-size: 9pt; font-weight: 600; color: #5b6b7a; }
+            QLabel { color: #0b1f33; }
+            QLabel:disabled { color: #6b7a89; }
             QPushButton {
                 background: #0078d4; color: white; border: none;
                 padding: 6px 14px; border-radius: 6px;
@@ -242,13 +240,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 padding: 6px;
             }
             QCheckBox { color: #0b1f33; }
+            QCheckBox:disabled { color: #6b7a89; }
+            QComboBox, QLineEdit, QDoubleSpinBox {
+                color: #0b1f33;
+                background: white;
+                border: 1px solid #c9d1d9;
+                border-radius: 6px;
+                padding: 2px 6px;
+            }
+            QComboBox:disabled, QLineEdit:disabled, QDoubleSpinBox:disabled {
+                color: #6b7a89;
+                background: #eef2f7;
+            }
             """
         )
 
     def _start(self):
-        if not self.short_toggle.isChecked():
-            QtWidgets.QMessageBox.information(self, "No mode", "Enable Short.")
-            return
         source_lang = "ja" if self.lang_select.currentIndex() == 0 else "en"
         engine = "whisper" if self.engine_select.currentIndex() == 0 else "lfm2"
         self._current_source_lang = source_lang
@@ -258,10 +265,10 @@ class MainWindow(QtWidgets.QMainWindow):
             chunk_seconds=self.chunk_spin.value(),
             engine=engine,
             lfm2_repo=self.lfm2_repo.text().strip(),
-            enable_short=self.short_toggle.isChecked(),
+            enable_short=True,
             enable_translation=self.translate_toggle.isChecked(),
         )
-        self._engine.set_short_enabled(cfg.enable_short)
+        self._engine.set_short_enabled(True)
         self._engine.set_translation_enabled(cfg.enable_translation)
         self._engine.start(cfg)
         self._engine.set_source_lang(source_lang)
@@ -623,11 +630,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_language_labels_for(self, source_lang: str):
         if source_lang == "ja":
-            self.jp_label.setText("Short (single chunk) - Japanese (Source)")
-            self.en_label.setText("Short (single chunk) - English (Translation)")
+            self.jp_label.setText("Japanese (Source)")
+            self.en_label.setText("English (Translation)")
         else:
-            self.jp_label.setText("Short (single chunk) - Japanese (Translation)")
-            self.en_label.setText("Short (single chunk) - English (Source)")
+            self.jp_label.setText("Japanese (Translation)")
+            self.en_label.setText("English (Source)")
 
     def _update_language_order_for(self, source_lang: str):
         layout = self._content_layout
